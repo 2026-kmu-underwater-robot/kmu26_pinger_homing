@@ -25,6 +25,19 @@ without permanently changing the shell environment:
 ./src/kmu26_mission_fsm/scripts/real_vehicle_preflight.sh --build
 ```
 
+If the vehicle uses different topic names, pass them explicitly:
+
+```bash
+./src/kmu26_mission_fsm/scripts/real_vehicle_preflight.sh --build \
+  --pose-topic /odometry/filtered \
+  --state-topic /mavros/state
+```
+
+`FAIL` on `/odometry/filtered` or `/mavros/state` means the robot localization
+or MAVROS bringup is not visible in the current ROS graph, or the topic names
+do not match the launch arguments. The preflight prints similar candidate
+topics when it can find them.
+
 After the package is built, the same check is also available through ROS:
 
 ```bash

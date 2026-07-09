@@ -11,10 +11,21 @@ DO_BUILD=0
 DO_SMOKE=1
 DO_ECHO=1
 ECHO_TIMEOUT_S=2
+POSE_TOPIC="/odometry/filtered"
+POSE_TYPE="nav_msgs/msg/Odometry"
+STATE_TOPIC="/mavros/state"
+STATE_TYPE="mavros_msgs/msg/State"
+YOLO_TOPIC="/uuv_mujoco/yolo_buoy_detections"
+YOLO_TYPE="std_msgs/msg/String"
+HYDROPHONE_DIRECTION_TOPIC="/mujoco/hydrophone/direction"
+HYDROPHONE_DIRECTION_TYPE="geometry_msgs/msg/Vector3Stamped"
 
 usage() {
   cat <<'EOF'
 Usage: real_vehicle_preflight.sh [--build] [--no-smoke] [--no-echo]
+                                 [--pose-topic TOPIC] [--state-topic TOPIC]
+                                 [--yolo-topic TOPIC]
+                                 [--hydrophone-direction-topic TOPIC]
 
 Checks that the installed kmu26_mission_fsm package matches the pulled source
 and that real-vehicle launch defaults/topics are sane. Use --build after git
@@ -22,18 +33,39 @@ pull to apply the source into the workspace install before checking.
 EOF
 }
 
-for arg in "$@"; do
-  case "$arg" in
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --build) DO_BUILD=1 ;;
     --no-smoke) DO_SMOKE=0 ;;
     --no-echo) DO_ECHO=0 ;;
+    --pose-topic)
+      [[ $# -ge 2 ]] || { echo "[FAIL] --pose-topic requires a value"; exit 2; }
+      POSE_TOPIC="$2"
+      shift
+      ;;
+    --state-topic)
+      [[ $# -ge 2 ]] || { echo "[FAIL] --state-topic requires a value"; exit 2; }
+      STATE_TOPIC="$2"
+      shift
+      ;;
+    --yolo-topic)
+      [[ $# -ge 2 ]] || { echo "[FAIL] --yolo-topic requires a value"; exit 2; }
+      YOLO_TOPIC="$2"
+      shift
+      ;;
+    --hydrophone-direction-topic)
+      [[ $# -ge 2 ]] || { echo "[FAIL] --hydrophone-direction-topic requires a value"; exit 2; }
+      HYDROPHONE_DIRECTION_TOPIC="$2"
+      shift
+      ;;
     -h|--help) usage; exit 0 ;;
     *)
-      echo "[FAIL] unknown argument: $arg"
+      echo "[FAIL] unknown argument: $1"
       usage
       exit 2
       ;;
   esac
+  shift
 done
 
 pass() { echo "[PASS] $*"; PASS_COUNT=$((PASS_COUNT + 1)); }
@@ -200,6 +232,19 @@ check_topic() {
   return 1
 }
 
+show_topic_candidates() {
+  local label="$1"
+  local pattern="$2"
+  local matches
+  matches="$(grep -Ei "$pattern" <<<"$TOPICS" | sed -n '1,12p' || true)"
+  if [[ -n "$matches" ]]; then
+    warn "$label candidates visible:"
+    sed 's/^/[INFO]   /' <<<"$matches"
+  else
+    warn "no $label-like topics visible"
+  fi
+}
+
 topic_echo_once() {
   local topic="$1"
   local label="$2"
@@ -213,14 +258,19 @@ topic_echo_once() {
   fi
 }
 
-if check_topic "/odometry/filtered" "nav_msgs/msg/Odometry" "required"; then
-  topic_echo_once "/odometry/filtered" "/odometry/filtered"
+if check_topic "$POSE_TOPIC" "$POSE_TYPE" "required"; then
+  topic_echo_once "$POSE_TOPIC" "$POSE_TOPIC"
+else
+  show_topic_candidates "odometry" "odom|odometry|ekf|filter|pose"
 fi
-if check_topic "/mavros/state" "mavros_msgs/msg/State" "required"; then
-  topic_echo_once "/mavros/state" "/mavros/state"
+if check_topic "$STATE_TOPIC" "$STATE_TYPE" "required"; then
+  topic_echo_once "$STATE_TOPIC" "$STATE_TOPIC"
+else
+  show_topic_candidates "mavros/state" "mavros|state"
 fi
-check_topic "/uuv_mujoco/yolo_buoy_detections" "std_msgs/msg/String" "optional"
-check_topic "/mujoco/hydrophone/direction" "geometry_msgs/msg/Vector3Stamped" "optional"
+check_topic "$YOLO_TOPIC" "$YOLO_TYPE" "optional" || show_topic_candidates "YOLO detection" "yolo|detect|vision|buoy"
+check_topic "$HYDROPHONE_DIRECTION_TOPIC" "$HYDROPHONE_DIRECTION_TYPE" "optional" ||
+  show_topic_candidates "hydrophone direction" "hydro|pinger|phase|bearing|direction"
 if ! grep -Fq "/mujoco/course_buoys/status [std_msgs/msg/String]" <<<"$TOPICS"; then
   pass "MuJoCo buoy status is absent; OK because require_live_status default is false"
 fi
