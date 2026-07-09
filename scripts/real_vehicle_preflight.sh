@@ -11,10 +11,22 @@ DO_BUILD=0
 DO_SMOKE=1
 DO_ECHO=1
 ECHO_TIMEOUT_S=2
+ROBOT_STACK_PACKAGE="${KMU26_ROBOT_PACKAGE:-hit25_auv_ros2}"
+ROBOT_STACK_LAUNCH="${KMU26_ROBOT_LAUNCH:-localization_test.launch.py}"
 POSE_TOPIC="/odometry/filtered"
 POSE_TYPE="nav_msgs/msg/Odometry"
 STATE_TOPIC="/mavros/state"
 STATE_TYPE="mavros_msgs/msg/State"
+DVL_TWIST_TOPIC="${KMU26_DVL_TWIST_TOPIC:-/dvl/twist}"
+DVL_TWIST_TYPE="geometry_msgs/msg/TwistWithCovarianceStamped"
+DEPTH_TOPIC="${KMU26_DEPTH_TOPIC:-/depth/pose}"
+DEPTH_TYPE="geometry_msgs/msg/PoseWithCovarianceStamped"
+IMU_TOPIC="${KMU26_IMU_TOPIC:-/mavros/imu/data}"
+IMU_TYPE="sensor_msgs/msg/Imu"
+JOY_TOPIC="${KMU26_JOY_TOPIC:-/joy}"
+JOY_TYPE="sensor_msgs/msg/Joy"
+BATTERY_TOPIC="${KMU26_BATTERY_TOPIC:-/battery}"
+BATTERY_TYPE="sensor_msgs/msg/BatteryState"
 YOLO_TOPIC="/uuv_mujoco/yolo_buoy_detections"
 YOLO_TYPE="std_msgs/msg/String"
 HYDROPHONE_DIRECTION_TOPIC="/mujoco/hydrophone/direction"
@@ -23,13 +35,19 @@ HYDROPHONE_DIRECTION_TYPE="geometry_msgs/msg/Vector3Stamped"
 usage() {
   cat <<'EOF'
 Usage: real_vehicle_preflight.sh [--build] [--no-smoke] [--no-echo]
+                                 [--robot-stack-package PKG]
+                                 [--robot-stack-launch LAUNCH]
                                  [--pose-topic TOPIC] [--state-topic TOPIC]
+                                 [--dvl-twist-topic TOPIC] [--depth-topic TOPIC]
+                                 [--imu-topic TOPIC] [--joy-topic TOPIC]
+                                 [--battery-topic TOPIC]
                                  [--yolo-topic TOPIC]
                                  [--hydrophone-direction-topic TOPIC]
 
 Checks that the installed kmu26_mission_fsm package matches the pulled source
-and that real-vehicle launch defaults/topics are sane. Use --build after git
-pull to apply the source into the workspace install before checking.
+and that real-vehicle launch defaults/topics match the original
+kmu26_auv_web_gui real-robot contract. Use --build after git pull to apply the
+source into the workspace install before checking.
 EOF
 }
 
@@ -38,6 +56,16 @@ while [[ $# -gt 0 ]]; do
     --build) DO_BUILD=1 ;;
     --no-smoke) DO_SMOKE=0 ;;
     --no-echo) DO_ECHO=0 ;;
+    --robot-stack-package)
+      [[ $# -ge 2 ]] || { echo "[FAIL] --robot-stack-package requires a value"; exit 2; }
+      ROBOT_STACK_PACKAGE="$2"
+      shift
+      ;;
+    --robot-stack-launch)
+      [[ $# -ge 2 ]] || { echo "[FAIL] --robot-stack-launch requires a value"; exit 2; }
+      ROBOT_STACK_LAUNCH="$2"
+      shift
+      ;;
     --pose-topic)
       [[ $# -ge 2 ]] || { echo "[FAIL] --pose-topic requires a value"; exit 2; }
       POSE_TOPIC="$2"
@@ -46,6 +74,31 @@ while [[ $# -gt 0 ]]; do
     --state-topic)
       [[ $# -ge 2 ]] || { echo "[FAIL] --state-topic requires a value"; exit 2; }
       STATE_TOPIC="$2"
+      shift
+      ;;
+    --dvl-twist-topic)
+      [[ $# -ge 2 ]] || { echo "[FAIL] --dvl-twist-topic requires a value"; exit 2; }
+      DVL_TWIST_TOPIC="$2"
+      shift
+      ;;
+    --depth-topic)
+      [[ $# -ge 2 ]] || { echo "[FAIL] --depth-topic requires a value"; exit 2; }
+      DEPTH_TOPIC="$2"
+      shift
+      ;;
+    --imu-topic)
+      [[ $# -ge 2 ]] || { echo "[FAIL] --imu-topic requires a value"; exit 2; }
+      IMU_TOPIC="$2"
+      shift
+      ;;
+    --joy-topic)
+      [[ $# -ge 2 ]] || { echo "[FAIL] --joy-topic requires a value"; exit 2; }
+      JOY_TOPIC="$2"
+      shift
+      ;;
+    --battery-topic)
+      [[ $# -ge 2 ]] || { echo "[FAIL] --battery-topic requires a value"; exit 2; }
+      BATTERY_TOPIC="$2"
       shift
       ;;
     --yolo-topic)
@@ -96,13 +149,16 @@ fi
 if [[ -n "$PKG_SRC" && "$PKG_SRC" == */src/kmu26_mission_fsm ]]; then
   WS_DIR="${PKG_SRC%/src/kmu26_mission_fsm}"
 elif [[ -z "$WS_DIR" && -n "$PKG_SRC" ]]; then
+  candidate="$(cd "$PKG_SRC/.." 2>/dev/null && pwd || true)"
+  [[ -f "$candidate/install/setup.bash" || -d "$candidate/src" || -d "$candidate/build" ]] && WS_DIR="$candidate"
   candidate="$(cd "$PKG_SRC/../.." 2>/dev/null && pwd || true)"
-  [[ -f "$candidate/install/setup.bash" || -d "$candidate/src" ]] && WS_DIR="$candidate"
+  [[ -z "$WS_DIR" && ( -f "$candidate/install/setup.bash" || -d "$candidate/src" || -d "$candidate/build" ) ]] && WS_DIR="$candidate"
   [[ -z "$WS_DIR" && -f "$PKG_SRC/install/setup.bash" ]] && WS_DIR="$PKG_SRC"
 fi
 
 info "package source: ${PKG_SRC:-unknown}"
 info "workspace: ${WS_DIR:-unknown}"
+info "web GUI robot stack: ${ROBOT_STACK_PACKAGE} ${ROBOT_STACK_LAUNCH}"
 
 ros_distro="${ROS_DISTRO:-humble}"
 if [[ -f "/opt/ros/$ros_distro/setup.bash" ]]; then
@@ -155,6 +211,23 @@ if [[ -n "$PKG_PREFIX" ]]; then
   pass "package visible: $PKG_PREFIX"
 else
   fail "package not visible to ros2; run this from the workspace or use --build"
+fi
+
+ROBOT_STACK_PREFIX=""
+if command -v ros2 >/dev/null 2>&1; then
+  ROBOT_STACK_PREFIX="$(ros2 pkg prefix "$ROBOT_STACK_PACKAGE" 2>/dev/null || true)"
+fi
+if [[ -n "$ROBOT_STACK_PREFIX" ]]; then
+  pass "web GUI robot stack package visible: $ROBOT_STACK_PACKAGE ($ROBOT_STACK_PREFIX)"
+  ROBOT_STACK_ARGS=""
+  if ROBOT_STACK_ARGS="$(ros2 launch "$ROBOT_STACK_PACKAGE" "$ROBOT_STACK_LAUNCH" --show-args 2>&1)"; then
+    pass "web GUI robot stack launch parses: $ROBOT_STACK_PACKAGE $ROBOT_STACK_LAUNCH"
+  else
+    fail "web GUI robot stack launch failed to parse: $ROBOT_STACK_PACKAGE $ROBOT_STACK_LAUNCH"
+    echo "$ROBOT_STACK_ARGS"
+  fi
+else
+  fail "web GUI robot stack package not visible: $ROBOT_STACK_PACKAGE"
 fi
 
 if [[ -n "$PKG_PREFIX" && -n "$PKG_SRC" ]]; then
@@ -267,6 +340,28 @@ if check_topic "$STATE_TOPIC" "$STATE_TYPE" "required"; then
   topic_echo_once "$STATE_TOPIC" "$STATE_TOPIC"
 else
   show_topic_candidates "mavros/state" "mavros|state"
+fi
+
+if check_topic "$DVL_TWIST_TOPIC" "$DVL_TWIST_TYPE" "recommended"; then
+  topic_echo_once "$DVL_TWIST_TOPIC" "$DVL_TWIST_TOPIC"
+else
+  show_topic_candidates "DVL twist" "dvl|twist|velocity"
+fi
+if check_topic "$DEPTH_TOPIC" "$DEPTH_TYPE" "recommended"; then
+  topic_echo_once "$DEPTH_TOPIC" "$DEPTH_TOPIC"
+else
+  show_topic_candidates "depth pose" "depth|pressure|pose"
+fi
+if check_topic "$IMU_TOPIC" "$IMU_TYPE" "recommended"; then
+  topic_echo_once "$IMU_TOPIC" "$IMU_TOPIC"
+else
+  show_topic_candidates "IMU" "imu|mavros"
+fi
+check_topic "$JOY_TOPIC" "$JOY_TYPE" "recommended" || show_topic_candidates "joy" "joy|rc|manual"
+if check_topic "$BATTERY_TOPIC" "$BATTERY_TYPE" "recommended"; then
+  topic_echo_once "$BATTERY_TOPIC" "$BATTERY_TOPIC"
+else
+  show_topic_candidates "battery" "battery|power|voltage"
 fi
 check_topic "$YOLO_TOPIC" "$YOLO_TYPE" "optional" || show_topic_candidates "YOLO detection" "yolo|detect|vision|buoy"
 check_topic "$HYDROPHONE_DIRECTION_TOPIC" "$HYDROPHONE_DIRECTION_TYPE" "optional" ||

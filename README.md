@@ -30,13 +30,22 @@ If the vehicle uses different topic names, pass them explicitly:
 ```bash
 ./src/kmu26_mission_fsm/scripts/real_vehicle_preflight.sh --build \
   --pose-topic /odometry/filtered \
-  --state-topic /mavros/state
+  --state-topic /mavros/state \
+  --dvl-twist-topic /dvl/twist \
+  --depth-topic /depth/pose
 ```
 
+The preflight follows the original `kmu26_auv_web_gui` real-robot contract:
+`hit25_auv_ros2 localization_test.launch.py` is the robot stack, and the GUI
+expects `/odometry/filtered`, `/dvl/twist`, `/depth/pose`,
+`/mavros/imu/data`, `/joy`, and `/battery`.
+
 `FAIL` on `/odometry/filtered` or `/mavros/state` means the robot localization
-or MAVROS bringup is not visible in the current ROS graph, or the topic names
-do not match the launch arguments. The preflight prints similar candidate
-topics when it can find them.
+or MAVROS bringup is not visible in the current ROS graph, or the topic names do
+not match the FSM launch arguments. `WARN` on DVL/depth/IMU/joy/battery means
+the mission package can still parse and start, but the real GUI stack is not
+publishing the same status topics it normally uses. The preflight prints similar
+candidate topics when it can find them.
 
 After the package is built, the same check is also available through ROS:
 
@@ -84,6 +93,11 @@ ros2 launch kmu26_mission_fsm mission_fsm_real.launch.py use_pinger_homing:=true
 
 - Pose input: `/odometry/filtered` (`nav_msgs/Odometry`)
 - Arm state: `/mavros/state`
+- GUI DVL velocity: `/dvl/twist` (`geometry_msgs/TwistWithCovarianceStamped`)
+- GUI depth pose: `/depth/pose` (`geometry_msgs/PoseWithCovarianceStamped`)
+- GUI IMU: `/mavros/imu/data` (`sensor_msgs/Imu`)
+- GUI joystick: `/joy` (`sensor_msgs/Joy`)
+- GUI battery: `/battery` (`sensor_msgs/BatteryState`)
 - RC output: `/mavros/rc/override`
 - YOLO status: `/uuv_mujoco/yolo_buoy_detections`
 - Hydrophone direction: `/mujoco/hydrophone/direction`
