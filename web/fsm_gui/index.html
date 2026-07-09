@@ -113,18 +113,47 @@
 
       <section class="panel map-panel">
         <div class="panel-head">
-          <h2>Mission Map</h2>
+          <h2>Mission View</h2>
           <span id="mapMeta" class="meta-line"></span>
+        </div>
+        <div class="map-toolbar">
+          <span id="mapFsmChip" class="pill">FSM n/a</span>
+          <span id="mapTargetChip" class="pill">target n/a</span>
+          <span id="mapDetectionChip" class="pill">detection n/a</span>
+          <span id="mapRcChip" class="pill">cmd n/a</span>
+          <label class="switch">
+            <input id="mapShowGrid" type="checkbox" checked>
+            <span>Grid</span>
+          </label>
+          <label class="switch">
+            <input id="mapShowLabels" type="checkbox" checked>
+            <span>Labels</span>
+          </label>
+          <label class="switch">
+            <input id="mapShowTrail" type="checkbox" checked>
+            <span>Trail</span>
+          </label>
         </div>
         <div class="map-frame">
           <canvas id="missionMap"></canvas>
+          <div id="mapHud" class="map-hud"></div>
         </div>
         <div class="map-legend">
           <span><i class="legend robot"></i>robot</span>
-          <span><i class="legend start"></i>start</span>
+          <span><i class="legend command"></i>cmd</span>
+          <span><i class="legend detection"></i>detection</span>
           <span><i class="legend target"></i>target</span>
-          <span><i class="legend buoy"></i>buoy</span>
-          <span><i class="legend score"></i>score</span>
+          <span><i class="legend attached"></i>attached</span>
+          <span><i class="legend floating"></i>floating</span>
+          <span><i class="legend processed"></i>processed</span>
+          <span><i class="legend score"></i>score zone</span>
+          <span><i class="legend boundary"></i>boundary</span>
+        </div>
+        <div class="map-readouts">
+          <div class="metric"><span>Robot</span><strong id="mapRobotReadout">n/a</strong></div>
+          <div class="metric"><span>Detected target</span><strong id="mapDetectionReadout">n/a</strong></div>
+          <div class="metric"><span>Surface collect</span><strong id="mapSurfaceReadout">n/a</strong></div>
+          <div class="metric"><span>Score zone</span><strong id="mapScoreReadout">n/a</strong></div>
         </div>
         <div class="form-grid map-config">
           <label>Tank X min

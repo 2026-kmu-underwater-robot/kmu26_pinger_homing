@@ -9,7 +9,9 @@ const ids = [
   "rcSendAxes", "axisForward", "axisLateral", "axisHeave", "axisYaw", "rcReadout",
   "topicRows", "buoyRows", "processLog", "missionMap", "mapMeta", "tankXMin", "tankXMax",
   "tankYMin", "tankYMax", "robotStartX", "robotStartY", "robotStartYaw", "scoreZoneX",
-  "scoreZoneY", "scoreZoneRadius"
+  "scoreZoneY", "scoreZoneRadius", "mapHud", "mapFsmChip", "mapTargetChip",
+  "mapDetectionChip", "mapRcChip", "mapShowGrid", "mapShowLabels", "mapShowTrail",
+  "mapRobotReadout", "mapDetectionReadout", "mapSurfaceReadout", "mapScoreReadout"
 ];
 
 for (const id of ids) {
@@ -19,6 +21,8 @@ for (const id of ids) {
 let firstConfigLoad = true;
 let lastCameraUrl = "";
 let latestStatus = null;
+const robotTrail = [];
+const ROBOT_TRAIL_MAX = 900;
 
 function fmt(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return "n/a";
@@ -145,7 +149,7 @@ function renderBuoys(status) {
     ].filter(Boolean).join(" ");
     return `<tr>
       <td title="${b.id || ""}">${b.id || "n/a"}</td>
-      <td>${b.class || b.target_class || "n/a"}</td>
+      <td>${b.class_name || b.class || b.target_class || "n/a"}</td>
       <td>${b.state || "n/a"}</td>
       <td>${xyz}</td>
       <td>${flags || "-"}</td>
@@ -169,11 +173,85 @@ function numberOr(value, fallback) {
   return Number.isFinite(num) ? num : fallback;
 }
 
-function normalizeLimits(config) {
+function finite(value) {
+  return Number.isFinite(Number(value));
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function shortId(id) {
+  return String(id || "n/a").replace(/^course_buoy_/, "").replace(/_float$/, "");
+}
+
+function getRobotPose(data) {
+  const status = data?.mission_status || {};
+  const telemetry = data?.telemetry || {};
+  return status.robot || telemetry.pose || {};
+}
+
+function getRobotYaw(robot) {
+  const yaw = Number(robot?.yaw_rad ?? robot?.yaw);
+  return Number.isFinite(yaw) ? yaw : 0;
+}
+
+function bodyToWorld(robot, local) {
+  if (!local || local.length < 2 || !finite(robot?.x) || !finite(robot?.y)) return null;
+  const yaw = getRobotYaw(robot);
+  const lx = Number(local[0]);
+  const ly = Number(local[1]);
+  return {
+    x: Number(robot.x) + Math.cos(yaw) * lx - Math.sin(yaw) * ly,
+    y: Number(robot.y) + Math.sin(yaw) * lx + Math.cos(yaw) * ly,
+    z: finite(local[2]) ? Number(robot.z || 0) + Number(local[2]) : null
+  };
+}
+
+function detectionWorld(data) {
+  const detection = data?.mission_status?.detection;
+  const robot = getRobotPose(data);
+  if (!detection?.p_intake) return null;
+  return bodyToWorld(robot, detection.p_intake);
+}
+
+function normalizeLimits(config, data) {
   let xMin = numberOr(config?.tank_x_min, -12);
   let xMax = numberOr(config?.tank_x_max, 12);
   let yMin = numberOr(config?.tank_y_min, -8);
   let yMax = numberOr(config?.tank_y_max, 8);
+  const points = [];
+  const status = data?.mission_status || {};
+  const robot = getRobotPose(data);
+  if (finite(robot.x) && finite(robot.y)) points.push([Number(robot.x), Number(robot.y)]);
+  for (const b of Array.isArray(status.buoys) ? status.buoys : []) {
+    if (Array.isArray(b.xyz) && b.xyz.length >= 2 && finite(b.xyz[0]) && finite(b.xyz[1])) {
+      points.push([Number(b.xyz[0]), Number(b.xyz[1])]);
+    }
+  }
+  const det = detectionWorld(data);
+  if (det) points.push([det.x, det.y]);
+  const collector = status.surface_collection?.collector_xyz;
+  if (Array.isArray(collector) && collector.length >= 2 && finite(collector[0]) && finite(collector[1])) {
+    points.push([Number(collector[0]), Number(collector[1])]);
+  }
+  const score = status.score_zone?.xyz;
+  if (Array.isArray(score) && score.length >= 2 && finite(score[0]) && finite(score[1])) {
+    points.push([Number(score[0]), Number(score[1])]);
+  } else {
+    points.push([numberOr(config?.score_zone_x, 8), numberOr(config?.score_zone_y, 0)]);
+  }
+  for (const [x, y] of points) {
+    xMin = Math.min(xMin, x);
+    xMax = Math.max(xMax, x);
+    yMin = Math.min(yMin, y);
+    yMax = Math.max(yMax, y);
+  }
+  const pad = Math.max(1.2, Math.min(5, Math.max(xMax - xMin, yMax - yMin) * 0.08));
+  xMin -= pad;
+  xMax += pad;
+  yMin -= pad;
+  yMax += pad;
   if (xMax <= xMin) xMax = xMin + 1;
   if (yMax <= yMin) yMax = yMin + 1;
   return {xMin, xMax, yMin, yMax};
@@ -203,6 +281,171 @@ function drawArrow(ctx, sx, sy, ex, ey, color, width = 2) {
   ctx.restore();
 }
 
+function drawText(ctx, text, x, y, color = "#25364a", align = "left") {
+  ctx.save();
+  ctx.font = "12px system-ui, sans-serif";
+  ctx.textAlign = align;
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = "rgba(255,255,255,0.85)";
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = color;
+  ctx.fillText(text, x, y);
+  ctx.restore();
+}
+
+function classColor(name) {
+  const cls = String(name || "").toLowerCase();
+  if (cls.includes("red")) return "#dc2626";
+  if (cls.includes("yellow")) return "#eab308";
+  if (cls.includes("orange")) return "#f97316";
+  if (cls.includes("white")) return "#f8fafc";
+  return "#8b95a1";
+}
+
+function buoyStyle(buoy, targetId) {
+  const cls = buoy.class_name || buoy.class || buoy.target_class || "";
+  const state = String(buoy.state || "").toUpperCase();
+  const isTarget = targetId && buoy.id === targetId;
+  const processed = Boolean(buoy.processed) || state === "PROCESSED" || state === "SCORED";
+  const failed = Boolean(buoy.failed) || state === "FAILED";
+  const netted = Boolean(buoy.netted) || state === "NETTED" || state === "SCORED";
+  let fill = classColor(cls);
+  let stroke = "#374151";
+  let radius = 5;
+  if (state === "FLOATING") {
+    stroke = "#1d4ed8";
+    radius = 6;
+  }
+  if (processed) {
+    stroke = "#15803d";
+    radius = 7;
+  }
+  if (netted) {
+    stroke = "#7c3aed";
+    radius = 8;
+  }
+  if (failed) {
+    fill = "#9ca3af";
+    stroke = "#4b5563";
+  }
+  if (isTarget) {
+    stroke = "#991b1b";
+    radius = 10;
+  }
+  return {fill, stroke, radius, line: isTarget ? 3 : 1.7, state, isTarget, failed, processed, netted};
+}
+
+function drawGrid(ctx, left, top, right, bottom, limits, toScreen, scale) {
+  const span = Math.max(limits.xMax - limits.xMin, limits.yMax - limits.yMin);
+  const step = span > 35 ? 5 : span > 14 ? 2 : 1;
+  ctx.save();
+  ctx.strokeStyle = "rgba(88, 113, 132, 0.20)";
+  ctx.lineWidth = 1;
+  ctx.font = "11px system-ui, sans-serif";
+  ctx.fillStyle = "#60717f";
+  for (let x = Math.ceil(limits.xMin / step) * step; x <= limits.xMax; x += step) {
+    const p = toScreen(x, 0);
+    ctx.beginPath();
+    ctx.moveTo(p.x, top);
+    ctx.lineTo(p.x, bottom);
+    ctx.stroke();
+    ctx.fillText(String(Number(x.toFixed(1))), p.x + 3, bottom - 4);
+  }
+  for (let y = Math.ceil(limits.yMin / step) * step; y <= limits.yMax; y += step) {
+    const p = toScreen(0, y);
+    ctx.beginPath();
+    ctx.moveTo(left, p.y);
+    ctx.lineTo(right, p.y);
+    ctx.stroke();
+    ctx.fillText(String(Number(y.toFixed(1))), left + 4, p.y - 3);
+  }
+  const origin = toScreen(0, 0);
+  ctx.strokeStyle = "rgba(15, 23, 42, 0.30)";
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  ctx.moveTo(origin.x, top);
+  ctx.lineTo(origin.x, bottom);
+  ctx.moveTo(left, origin.y);
+  ctx.lineTo(right, origin.y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function updateRobotTrail(robot) {
+  if (!finite(robot?.x) || !finite(robot?.y)) return;
+  const last = robotTrail[robotTrail.length - 1];
+  const x = Number(robot.x);
+  const y = Number(robot.y);
+  if (!last || Math.hypot(last.x - x, last.y - y) > 0.05) {
+    robotTrail.push({x, y, t: Date.now()});
+    while (robotTrail.length > ROBOT_TRAIL_MAX) robotTrail.shift();
+  }
+}
+
+function drawTrail(ctx, toScreen) {
+  if (robotTrail.length < 2) return;
+  ctx.save();
+  ctx.strokeStyle = "rgba(27, 92, 158, 0.38)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i < robotTrail.length; i += 1) {
+    const p = toScreen(robotTrail[i].x, robotTrail[i].y);
+    if (i === 0) ctx.moveTo(p.x, p.y);
+    else ctx.lineTo(p.x, p.y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawRobot(ctx, robot, toScreen, scale) {
+  if (!finite(robot?.x) || !finite(robot?.y)) return null;
+  const p = toScreen(Number(robot.x), Number(robot.y));
+  const yaw = getRobotYaw(robot);
+  const bodyL = Math.max(20, 1.25 * scale);
+  const bodyW = Math.max(14, 0.75 * scale);
+  const nose = [
+    [bodyL * 0.62, 0],
+    [-bodyL * 0.42, bodyW * 0.55],
+    [-bodyL * 0.32, 0],
+    [-bodyL * 0.42, -bodyW * 0.55],
+  ];
+  const rot = (pt) => ({
+    x: p.x + Math.cos(yaw) * pt[0] + Math.sin(yaw) * pt[1],
+    y: p.y - Math.sin(yaw) * pt[0] + Math.cos(yaw) * pt[1]
+  });
+  ctx.save();
+  ctx.fillStyle = "#1b5c9e";
+  ctx.strokeStyle = "#062b50";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  const first = rot(nose[0]);
+  ctx.moveTo(first.x, first.y);
+  for (const pt of nose.slice(1)) {
+    const q = rot(pt);
+    ctx.lineTo(q.x, q.y);
+  }
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  drawArrow(ctx, p.x, p.y, p.x + Math.cos(yaw) * 42, p.y - Math.sin(yaw) * 42, "#062b50", 3);
+  ctx.restore();
+  return p;
+}
+
+function drawMetricRings(ctx, robot, toScreen, scale) {
+  if (!finite(robot?.x) || !finite(robot?.y)) return;
+  const p = toScreen(Number(robot.x), Number(robot.y));
+  ctx.save();
+  ctx.strokeStyle = "rgba(27, 92, 158, 0.18)";
+  ctx.lineWidth = 1;
+  for (const r of [1, 3, 5]) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r * scale, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
 function drawMissionMap(data) {
   const canvas = els.missionMap;
   if (!canvas) return;
@@ -220,8 +463,8 @@ function drawMissionMap(data) {
 
   const config = data.config || {};
   const status = data.mission_status || {};
-  const limits = normalizeLimits(config);
-  const pad = 38;
+  const limits = normalizeLimits(config, data);
+  const pad = 42;
   const viewW = rect.width - pad * 2;
   const viewH = rect.height - pad * 2;
   const sx = viewW / (limits.xMax - limits.xMin);
@@ -237,7 +480,7 @@ function drawMissionMap(data) {
   });
 
   ctx.clearRect(0, 0, rect.width, rect.height);
-  ctx.fillStyle = "#eaf3fb";
+  ctx.fillStyle = "#e9f1f7";
   ctx.fillRect(0, 0, rect.width, rect.height);
 
   const bx = numberOr(config.course_boundary_x, 0);
@@ -249,10 +492,14 @@ function drawMissionMap(data) {
   const boundary = toScreen(bx, 0).x;
   const ownLeft = ownSide !== "b";
 
-  ctx.fillStyle = ownLeft ? "rgba(53, 137, 201, 0.14)" : "rgba(205, 91, 91, 0.12)";
+  ctx.fillStyle = ownLeft ? "rgba(36, 104, 162, 0.14)" : "rgba(184, 50, 50, 0.10)";
   ctx.fillRect(left.x, left.y, boundary - left.x, right.y - left.y);
-  ctx.fillStyle = ownLeft ? "rgba(205, 91, 91, 0.12)" : "rgba(53, 137, 201, 0.14)";
+  ctx.fillStyle = ownLeft ? "rgba(184, 50, 50, 0.10)" : "rgba(36, 104, 162, 0.14)";
   ctx.fillRect(boundary, left.y, right.x - boundary, right.y - left.y);
+
+  if (els.mapShowGrid?.checked) {
+    drawGrid(ctx, left.x, left.y, right.x, right.y, limits, toScreen, scale);
+  }
 
   ctx.strokeStyle = "#486577";
   ctx.lineWidth = 1.5;
@@ -279,22 +526,26 @@ function drawMissionMap(data) {
     ctx.setLineDash([]);
   }
 
-  ctx.fillStyle = "#2f4354";
-  ctx.font = "12px system-ui, sans-serif";
-  ctx.fillText(`tank x ${limits.xMin}..${limits.xMax} m | y ${limits.yMin}..${limits.yMax} m`, left.x, Math.max(14, left.y - 12));
-  ctx.fillText(ownLeft ? "A / own" : "B / own", left.x + 8, left.y + 18);
-  ctx.fillText(ownLeft ? "B / opponent" : "A / opponent", boundary + 8, left.y + 18);
+  const labels = Boolean(els.mapShowLabels?.checked);
+  if (labels) {
+    drawText(ctx, `tank x ${fmt(limits.xMin, 1)}..${fmt(limits.xMax, 1)} | y ${fmt(limits.yMin, 1)}..${fmt(limits.yMax, 1)} m`, left.x, Math.max(14, left.y - 14));
+    drawText(ctx, ownLeft ? "A / own" : "B / own", left.x + 8, left.y + 18, "#1f5a89");
+    drawText(ctx, ownLeft ? "B / opponent" : "A / opponent", boundary + 8, left.y + 18, "#8b2b2b");
+  }
 
-  const score = toScreen(numberOr(config.score_zone_x, 8), numberOr(config.score_zone_y, 0));
-  const scoreRadius = Math.max(0, numberOr(config.score_zone_radius, 1.5)) * scale;
+  const scoreWorld = Array.isArray(status.score_zone?.xyz) && status.score_zone.xyz.length >= 2
+    ? {x: Number(status.score_zone.xyz[0]), y: Number(status.score_zone.xyz[1])}
+    : {x: numberOr(config.score_zone_x, 8), y: numberOr(config.score_zone_y, 0)};
+  const score = toScreen(scoreWorld.x, scoreWorld.y);
+  const scoreRadiusM = Math.max(0, numberOr(status.score_zone?.radius_m, numberOr(config.score_zone_radius, 1.5)));
+  const scoreRadius = scoreRadiusM * scale;
   ctx.fillStyle = "rgba(36, 163, 106, 0.22)";
   ctx.strokeStyle = "#16824f";
   ctx.beginPath();
   ctx.arc(score.x, score.y, scoreRadius, 0, Math.PI * 2);
   ctx.fill();
   ctx.stroke();
-  ctx.fillStyle = "#146c43";
-  ctx.fillText("score", score.x + 6, score.y - 6);
+  if (labels) drawText(ctx, "score zone", score.x + 8, score.y - 8, "#146c43");
 
   const start = toScreen(numberOr(config.robot_start_x, 0), numberOr(config.robot_start_y, 0));
   const startYaw = numberOr(config.robot_start_yaw_deg, 0) * Math.PI / 180;
@@ -305,74 +556,132 @@ function drawMissionMap(data) {
   ctx.fill();
   ctx.stroke();
   drawArrow(ctx, start.x, start.y, start.x + Math.cos(startYaw) * 26, start.y - Math.sin(startYaw) * 26, "#7a5d00", 2);
+  if (labels) drawText(ctx, "start", start.x + 8, start.y + 15, "#7a5d00");
+
+  const collector = status.surface_collection?.collector_xyz;
+  if (Array.isArray(collector) && collector.length >= 2 && finite(collector[0]) && finite(collector[1])) {
+    const c = toScreen(Number(collector[0]), Number(collector[1]));
+    const wx = Math.max(0, numberOr(status.surface_collection?.x_window_m, 0.85)) * scale;
+    const wy = Math.max(0, numberOr(status.surface_collection?.y_window_m, 0.75)) * scale;
+    ctx.save();
+    ctx.strokeStyle = "#7c3aed";
+    ctx.fillStyle = "rgba(124, 58, 237, 0.10)";
+    ctx.lineWidth = 1.6;
+    ctx.strokeRect(c.x - wx / 2, c.y - wy / 2, wx, wy);
+    ctx.fillRect(c.x - wx / 2, c.y - wy / 2, wx, wy);
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = "#7c3aed";
+    ctx.fill();
+    ctx.restore();
+    if (labels) drawText(ctx, "collector", c.x + 8, c.y + 16, "#5b21b6");
+  }
 
   const buoys = Array.isArray(status.buoys) ? status.buoys : [];
   const targetId = status.target_id || "";
   for (const buoy of buoys) {
-    if (!Array.isArray(buoy.xyz) || buoy.xyz.length < 2) continue;
+    if (!Array.isArray(buoy.xyz) || buoy.xyz.length < 2 || !finite(buoy.xyz[0]) || !finite(buoy.xyz[1])) continue;
     const p = toScreen(Number(buoy.xyz[0]), Number(buoy.xyz[1]));
-    const isTarget = targetId && buoy.id === targetId;
-    const failed = Boolean(buoy.failed);
-    const processed = Boolean(buoy.processed);
-    ctx.fillStyle = failed ? "#8a8f98" : processed ? "#24a36a" : isTarget ? "#d23232" : "#f28c28";
-    ctx.strokeStyle = isTarget ? "#7d0000" : "#603813";
-    ctx.lineWidth = isTarget ? 2.5 : 1;
+    const style = buoyStyle(buoy, targetId);
+    ctx.fillStyle = style.fill;
+    ctx.strokeStyle = style.stroke;
+    ctx.lineWidth = style.line;
     ctx.beginPath();
-    ctx.arc(p.x, p.y, isTarget ? 8 : 5, 0, Math.PI * 2);
+    ctx.arc(p.x, p.y, style.radius, 0, Math.PI * 2);
     ctx.fill();
     ctx.stroke();
-    if (isTarget) {
-      ctx.fillStyle = "#7d0000";
-      ctx.fillText("target", p.x + 8, p.y - 8);
+    if (style.failed) {
+      ctx.strokeStyle = "#111827";
+      ctx.beginPath();
+      ctx.moveTo(p.x - 5, p.y - 5);
+      ctx.lineTo(p.x + 5, p.y + 5);
+      ctx.moveTo(p.x + 5, p.y - 5);
+      ctx.lineTo(p.x - 5, p.y + 5);
+      ctx.stroke();
+    }
+    if (labels && (style.isTarget || style.processed || style.netted)) {
+      const label = `${shortId(buoy.id)} ${style.state.toLowerCase()}`;
+      drawText(ctx, label, p.x + 10, p.y - 8, style.isTarget ? "#991b1b" : "#25364a");
     }
   }
 
-  const robotSource = status.robot || data.telemetry?.pose || {};
+  const robotSource = getRobotPose(data);
   const robotX = Number(robotSource.x);
   const robotY = Number(robotSource.y);
-  const robotYaw = Number(robotSource.yaw_rad ?? robotSource.yaw);
-  if (Number.isFinite(robotX) && Number.isFinite(robotY)) {
-    const robot = toScreen(robotX, robotY);
-    ctx.fillStyle = "#1b5c9e";
-    ctx.strokeStyle = "#062b50";
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(robot.x, robot.y, 8, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    if (Number.isFinite(robotYaw)) {
-      drawArrow(ctx, robot.x, robot.y, robot.x + Math.cos(robotYaw) * 34, robot.y - Math.sin(robotYaw) * 34, "#062b50", 3);
-    }
+  const robotYaw = getRobotYaw(robotSource);
+  updateRobotTrail(robotSource);
+  if (els.mapShowTrail?.checked) drawTrail(ctx, toScreen);
+  drawMetricRings(ctx, robotSource, toScreen, scale);
+  const robot = drawRobot(ctx, robotSource, toScreen, scale);
+  if (robot) {
     const cmd = status.command || {};
     const forward = Number(cmd.forward);
     const sway = Number(cmd.sway);
     if (Number.isFinite(forward) && Number.isFinite(sway) && Math.hypot(forward, sway) > 0.01) {
-      const yaw = Number.isFinite(robotYaw) ? robotYaw : 0;
-      const worldX = Math.cos(yaw) * forward - Math.sin(yaw) * sway;
-      const worldY = Math.sin(yaw) * forward + Math.cos(yaw) * sway;
-      drawArrow(ctx, robot.x, robot.y, robot.x + worldX * 40, robot.y - worldY * 40, "#255f2f", 2);
+      const worldX = Math.cos(robotYaw) * forward - Math.sin(robotYaw) * sway;
+      const worldY = Math.sin(robotYaw) * forward + Math.cos(robotYaw) * sway;
+      drawArrow(ctx, robot.x, robot.y, robot.x + worldX * 48, robot.y - worldY * 48, "#245b2b", 2.5);
     }
+    if (labels) drawText(ctx, `robot yaw ${fmt(robotYaw, 2)}`, robot.x + 12, robot.y + 22, "#062b50");
   }
 
   const detection = status.detection;
-  if (detection?.p_intake && Number.isFinite(robotX) && Number.isFinite(robotY)) {
-    const yaw = Number.isFinite(robotYaw) ? robotYaw : 0;
-    const dx = Number(detection.p_intake[0] ?? 0);
-    const dy = Number(detection.p_intake[1] ?? 0);
-    const wx = robotX + Math.cos(yaw) * dx - Math.sin(yaw) * dy;
-    const wy = robotY + Math.sin(yaw) * dx + Math.cos(yaw) * dy;
-    const p = toScreen(wx, wy);
-    ctx.strokeStyle = "#d23232";
+  const detWorld = detectionWorld(data);
+  if (detection?.p_intake && detWorld && robot) {
+    const p = toScreen(detWorld.x, detWorld.y);
+    ctx.save();
+    ctx.strokeStyle = "#8b3fb8";
+    ctx.fillStyle = "rgba(139, 63, 184, 0.10)";
     ctx.lineWidth = 2;
+    ctx.setLineDash([7, 5]);
+    ctx.beginPath();
+    ctx.moveTo(robot.x, robot.y);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
     ctx.beginPath();
     ctx.moveTo(p.x - 8, p.y);
     ctx.lineTo(p.x + 8, p.y);
     ctx.moveTo(p.x, p.y - 8);
     ctx.lineTo(p.x, p.y + 8);
     ctx.stroke();
+    const rangePx = Math.max(0, Number(detection.distance_m || 0)) * scale;
+    if (rangePx > 1) {
+      ctx.beginPath();
+      ctx.arc(robot.x, robot.y, rangePx, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(139, 63, 184, 0.28)";
+      ctx.stroke();
+    }
+    ctx.restore();
+    if (labels) drawText(ctx, `det ${fmt(detection.distance_m, 2)}m`, p.x + 10, p.y + 14, "#6b21a8");
   }
 
-  els.mapMeta.textContent = `scale ${fmt(1 / scale, 2)} m/px | boundary x=${fmt(bx, 1)} | margin ${fmt(margin, 1)} | standoff ${fmt(standoff, 1)}`;
+  const target = targetId ? shortId(targetId) : "none";
+  const detText = detection ? `${shortId(detection.buoy_id)} ${fmt(detection.distance_m, 2)}m bearing ${fmt(detection.bearing_rad, 2)}` : "none";
+  const cmd = status.command || {};
+  const cmdMag = Math.hypot(Number(cmd.forward || 0), Number(cmd.sway || 0), Number(cmd.heave || 0), Number(cmd.yaw || 0));
+  els.mapMeta.textContent = `scale ${fmt(1 / scale, 2)} m/px | boundary x=${fmt(bx, 1)} | margin ${fmt(margin, 1)} | standoff ${fmt(standoff, 1)} | buoys ${buoys.length}`;
+  setPill(els.mapFsmChip, status.state || "FSM n/a", status.state ? "ok" : "");
+  setPill(els.mapTargetChip, `target ${target}`, targetId ? "warn" : "");
+  setPill(els.mapDetectionChip, detection ? `det ${fmt(detection.distance_m, 1)}m` : "detection none", detection ? "ok" : "");
+  setPill(els.mapRcChip, `cmd ${fmt(cmdMag, 2)}`, cmdMag > 0.05 ? "warn" : "");
+  els.mapRobotReadout.textContent = finite(robotX) && finite(robotY)
+    ? `x ${fmt(robotX)} y ${fmt(robotY)} z ${fmt(robotSource.z)} yaw ${fmt(robotYaw)}`
+    : "n/a";
+  els.mapDetectionReadout.textContent = detText;
+  const surface = status.surface_collection || {};
+  els.mapSurfaceReadout.textContent = `rem ${surface.remaining ?? "n/a"} | gt ${surface.ground_truth_collect ?? "n/a"}`;
+  const scoreState = status.score_zone || {};
+  els.mapScoreReadout.textContent = `entered ${scoreState.entered ?? false} | buoys ${scoreState.collected_buoys_in_zone ?? false}`;
+  els.mapHud.textContent = [
+    `FSM: ${status.state || "NO_STATUS"} / ${status.robot_state_label || "n/a"}`,
+    `Mode: ${status.mode || "n/a"}  elapsed: ${fmt(status.mission_elapsed_s, 1)}s`,
+    `Target: ${target}`,
+    `Detected: ${detText}`,
+    `Counts: rem ${status.remaining_attached ?? 0} ok ${status.processed_count ?? 0} fail ${status.failed_count ?? 0} scored ${status.scored_count ?? 0}`,
+    `Command: ${cmd.phase || "n/a"} f=${fmt(cmd.forward)} s=${fmt(cmd.sway)} h=${fmt(cmd.heave)} y=${fmt(cmd.yaw)}`,
+    `Live: stale=${status.live_status?.stale ?? "n/a"} age=${fmt(status.live_status?.latest_age_s, 1)}s`
+  ].join("\n");
 }
 
 function renderStatus(data) {
@@ -461,7 +770,8 @@ els.cameraEnabled.addEventListener("change", () => saveConfig().then(reloadCamer
 for (const id of [
   "tankXMin", "tankXMax", "tankYMin", "tankYMax", "robotStartX", "robotStartY",
   "robotStartYaw", "scoreZoneX", "scoreZoneY", "scoreZoneRadius", "boundaryX",
-  "boundaryMargin", "boundaryStandoff", "ownCourse"
+  "boundaryMargin", "boundaryStandoff", "ownCourse", "mapShowGrid", "mapShowLabels",
+  "mapShowTrail"
 ]) {
   els[id].addEventListener("input", () => {
     if (!latestStatus) return;
@@ -469,6 +779,10 @@ for (const id of [
     drawMissionMap(latestStatus);
   });
 }
+
+window.addEventListener("resize", () => {
+  if (latestStatus) drawMissionMap(latestStatus);
+});
 
 refreshStatus();
 setInterval(refreshStatus, 700);
