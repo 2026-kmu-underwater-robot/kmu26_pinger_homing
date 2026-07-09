@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import mimetypes
 import os
 import signal
@@ -72,6 +73,23 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
     tmp.replace(path)
+
+
+def json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if hasattr(value, "item"):
+        try:
+            return json_safe(value.item())
+        except Exception:
+            pass
+    return str(value)
 
 
 @dataclass
@@ -676,7 +694,7 @@ class FsmWebHandler(BaseHTTPRequestHandler):
         return payload
 
     def _send_json(self, payload: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
-        data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        data = json.dumps(json_safe(payload), ensure_ascii=False, allow_nan=False).encode("utf-8")
         self._send_binary(data, "application/json; charset=utf-8", status)
 
     def _send_binary(self, data: bytes, content_type: str, status: HTTPStatus = HTTPStatus.OK) -> None:
