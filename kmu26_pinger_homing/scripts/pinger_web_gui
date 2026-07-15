@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-from kmu26_auv_web_gui.server import main
+from kmu26_pinger_web_gui.server import main
 
 
 if __name__ == "__main__":

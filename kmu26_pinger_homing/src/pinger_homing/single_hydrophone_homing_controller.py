@@ -12,7 +12,6 @@ from dataclasses import dataclass
 import numpy as np
 import rclpy
 from geometry_msgs.msg import Vector3Stamped
-from hit25_auv_ros2_msg.msg import CollectorState
 from mavros_msgs.msg import OverrideRCIn, State
 from nav_msgs.msg import Odometry
 from rclpy.executors import ExternalShutdownException
@@ -54,14 +53,13 @@ class SingleHydrophoneHomingController(Node):
         self.declare_parameter("delta_range_topic", "/audio_phase_estimator/delta_range_m")
         self.declare_parameter("iq_magnitude_topic", "/audio_phase_estimator/iq_magnitude")
         self.declare_parameter("direction_input_topic", "/homing/direction")
-        self.declare_parameter("collector_topic", "/collector/state")
         self.declare_parameter("direction_output_topic", "/pinger_homing/direction_body")
         self.declare_parameter("status_topic", "/pinger_homing/status")
         self.declare_parameter("rc_output_topic", "/control/pinger/rc_override")
         self.declare_parameter("dry_run", True)
         self.declare_parameter("rate_hz", 30.0)
         self.declare_parameter("forward_max", 0.48)
-        self.declare_parameter("max_runtime_s", 0.0)
+        self.declare_parameter("max_runtime_s", 180.0)
         self.declare_parameter("yaw_gain", 0.85)
         self.declare_parameter("yaw_rate_damping", 0.18)
         self.declare_parameter("yaw_command_limit", 0.42)
@@ -75,7 +73,7 @@ class SingleHydrophoneHomingController(Node):
         self.declare_parameter("audio_timeout_s", 3.0)
         self.declare_parameter("vehicle_disconnect_grace_s", 0.0)
         self.declare_parameter("max_source_z_world", -0.5)
-        self.declare_parameter("tank_max_depth_m", 0.0)
+        self.declare_parameter("tank_max_depth_m", 11.0)
         # New mission-prior names. Negative values retain the legacy deep-pool
         # parameters below for existing launch files.
         self.declare_parameter("pinger_expected_depth_m", -1.0)
@@ -86,7 +84,9 @@ class SingleHydrophoneHomingController(Node):
         self.declare_parameter("probe_heave", -0.18)
         self.declare_parameter("success_range_m", 0.0)
         self.declare_parameter("success_hold_s", 0.8)
-        self.declare_parameter("amplitude_range_constant", 0.325)
+        self.declare_parameter("arrival_radius_m", 1.5)
+        self.declare_parameter("arrival_hold_s", 1.0)
+        self.declare_parameter("amplitude_range_constant", 0.0)
         self.declare_parameter("pinger_depth_m", 8.85)
         self.declare_parameter("pinger_contact_depth_m", 8.50)
         self.declare_parameter("source_min_x_m", -16.5)
@@ -99,7 +99,6 @@ class SingleHydrophoneHomingController(Node):
         delta_range_topic = str(self.get_parameter("delta_range_topic").value)
         iq_magnitude_topic = str(self.get_parameter("iq_magnitude_topic").value)
         direction_input_topic = str(self.get_parameter("direction_input_topic").value)
-        collector_topic = str(self.get_parameter("collector_topic").value)
         direction_output_topic = str(self.get_parameter("direction_output_topic").value)
         status_topic = str(self.get_parameter("status_topic").value)
         rc_output_topic = str(self.get_parameter("rc_output_topic").value)
@@ -184,6 +183,12 @@ class SingleHydrophoneHomingController(Node):
         self._probe_heave_for_state = 0.0
         self._success_range_m = float(max(0.0, self.get_parameter("success_range_m").value))
         self._success_hold_s = float(max(0.1, self.get_parameter("success_hold_s").value))
+        self._arrival_radius_m = float(
+            max(0.0, self.get_parameter("arrival_radius_m").value)
+        )
+        self._arrival_hold_s = float(
+            max(0.1, self.get_parameter("arrival_hold_s").value)
+        )
         self._amplitude_range_constant = float(
             max(0.0, self.get_parameter("amplitude_range_constant").value)
         )
@@ -225,18 +230,20 @@ class SingleHydrophoneHomingController(Node):
         self._last_fit_wall = float("-inf")
         self._state = "WAIT_VEHICLE"
         self._state_started_wall = time.monotonic()
-        self._started_wall = self._state_started_wall
+        self._active_started_wall: float | None = None
         self._probe_attempt = 0
-        self._capture_confirmed = False
         self._range_complete = False
+        self._arrival_complete = False
+        self._completion_reason = ""
         self._range_success_started_wall: float | None = None
+        self._arrival_success_started_wall: float | None = None
         self._last_requested_command = (0.0, 0.0, 0.0, 0.0)
         self._last_command = (0.0, 0.0, 0.0, 0.0)
         self._depth_limit_active = False
         self._depth_recovery_active = False
         self._vehicle_depth_m: float | None = None
         self._best_amplitude_distance = float("inf")
-        self._last_range_progress_wall = self._started_wall
+        self._last_range_progress_wall = self._state_started_wall
         self._near_reprobe_count = 0
 
         self._rc_pub = self.create_publisher(OverrideRCIn, rc_output_topic, 10)
@@ -258,7 +265,6 @@ class SingleHydrophoneHomingController(Node):
             self._on_original_direction,
             10,
         )
-        self.create_subscription(CollectorState, collector_topic, self._on_collector, 10)
         self._timer = self.create_timer(1.0 / max(rate_hz, 1.0), self._control_tick)
         self._status_timer = self.create_timer(0.2, self._publish_status)
         self.get_logger().info(
@@ -275,7 +281,9 @@ class SingleHydrophoneHomingController(Node):
             f"max_vehicle_depth={self._max_vehicle_depth_m:.3f}m "
             f"depth_soft_margin={self._depth_soft_margin_m:.3f}m "
             f"probe_heave={'auto' if self._auto_source_depth else f'{self._probe_heave:+.3f}'} "
-            f"success_range={self._success_range_m:.3f}m/{self._success_hold_s:.2f}s"
+            f"arrival={self._arrival_radius_m:.3f}m/{self._arrival_hold_s:.2f}s "
+            f"calibrated_success_range={self._success_range_m:.3f}m/"
+            f"{self._success_hold_s:.2f}s max_runtime={self._max_runtime_s:.1f}s"
         )
 
     def _on_odometry(self, msg: Odometry) -> None:
@@ -349,35 +357,32 @@ class SingleHydrophoneHomingController(Node):
         if 0.1 < range_m < 80.0:
             self._amplitude_range_history.append(float(range_m))
 
-    def _on_collector(self, msg: CollectorState) -> None:
-        target_id = str(msg.target_id).lower()
-        if "pinger" in target_id and (msg.detached or msg.captured or msg.netted):
-            self._capture_confirmed = True
-            self._transition("COMPLETE")
-
     def _control_tick(self) -> None:
         now = time.monotonic()
-        if self._capture_confirmed:
-            self._publish_rc()
+        if self._state in {"COMPLETE", "FAILED_TIMEOUT", "FAILED_ESTIMATE"}:
+            self._publish_release()
             return
-        if self._range_complete:
-            self._publish_rc()
-            raise SystemExit(0)
-        if self._max_runtime_s > 0.0 and now - self._started_wall > self._max_runtime_s:
+        if (
+            self._max_runtime_s > 0.0
+            and self._active_started_wall is not None
+            and now - self._active_started_wall > self._max_runtime_s
+        ):
             self._transition("FAILED_TIMEOUT")
-            self._publish_rc()
-            raise SystemExit(2)
+            self._publish_release()
+            return
         if not self._ready(now):
             self._transition("WAIT_VEHICLE")
-            self._publish_rc()
+            self._publish_release()
             return
         if self._state == "WAIT_VEHICLE":
+            if self._active_started_wall is None:
+                self._active_started_wall = now
             self._transition("PROBE")
 
         self._maybe_fit_source(now)
-        if self._maybe_complete_by_range(now):
-            self._publish_rc()
-            raise SystemExit(0)
+        if self._maybe_complete(now):
+            self._publish_release()
+            return
         if self._state == "PROBE":
             self._publish_phase_direction_if_available(now)
             command = self._probe_command(now)
@@ -388,36 +393,69 @@ class SingleHydrophoneHomingController(Node):
             command = self._probe_command(now, mirrored=True)
             self._publish_rc(*command)
             return
-        if self._state in {"FAILED_TIMEOUT", "FAILED_ESTIMATE"}:
-            self._publish_rc()
-            raise SystemExit(3)
-        if self._state == "COMPLETE":
-            self._publish_rc()
-            return
         self._approach_command(now)
 
-    def _maybe_complete_by_range(self, now: float) -> bool:
-        if self._success_range_m <= 0.0 or self._state not in {"ALIGN", "APPROACH", "CONTACT"}:
+    def _maybe_complete(self, now: float) -> bool:
+        if self._state not in {"ALIGN", "APPROACH", "CONTACT"}:
             self._range_success_started_wall = None
+            self._arrival_success_started_wall = None
             return False
-        distance = self._current_amplitude_range()
-        self._range_success_started_wall, complete = update_range_success_timer(
-            distance,
-            threshold_m=self._success_range_m,
-            hold_s=self._success_hold_s,
-            now_s=now,
-            started_s=self._range_success_started_wall,
+
+        if self._success_range_m > 0.0:
+            amplitude_distance = self._current_amplitude_range()
+            self._range_success_started_wall, calibrated_complete = update_range_success_timer(
+                amplitude_distance,
+                threshold_m=self._success_range_m,
+                hold_s=self._success_hold_s,
+                now_s=now,
+                started_s=self._range_success_started_wall,
+            )
+            if calibrated_complete:
+                self._range_complete = True
+                self._completion_reason = "calibrated_range"
+                self.get_logger().info(
+                    "pinger homing calibrated-range success: "
+                    f"range={amplitude_distance:.3f}m "
+                    f"threshold={self._success_range_m:.3f}m"
+                )
+                self._transition("COMPLETE")
+                return True
+
+        estimated_distance = self._current_estimated_distance()
+        estimate_ready = bool(
+            self._arrival_radius_m > 0.0
+            and self._source_locked is not None
+            and self._estimate_usable()
         )
-        if not complete:
+        self._arrival_success_started_wall, arrival_complete = update_range_success_timer(
+            estimated_distance if estimate_ready else None,
+            threshold_m=self._arrival_radius_m,
+            hold_s=self._arrival_hold_s,
+            now_s=now,
+            started_s=self._arrival_success_started_wall,
+        )
+        if not arrival_complete:
             return False
-        self._range_complete = True
+        self._arrival_complete = True
+        self._completion_reason = "estimated_arrival"
         self.get_logger().info(
-            "pinger homing range success: "
-            f"estimated_range={distance:.3f}m threshold={self._success_range_m:.3f}m "
-            f"hold={now - float(self._range_success_started_wall):.3f}s"
+            "pinger homing arrival success: "
+            f"estimated_range={estimated_distance:.3f}m "
+            f"radius={self._arrival_radius_m:.3f}m"
         )
         self._transition("COMPLETE")
         return True
+
+    def _current_estimated_distance(self) -> float | None:
+        if self._position is None:
+            return None
+        control_source = (
+            self._source_locked if self._source_locked is not None else self._source_smoothed
+        )
+        if control_source is None:
+            return None
+        distance = float(np.linalg.norm(control_source - self._position))
+        return distance if math.isfinite(distance) and distance >= 0.0 else None
 
     def _ready(self, now: float) -> bool:
         return bool(
@@ -614,7 +652,7 @@ class SingleHydrophoneHomingController(Node):
 
     def _approach_command(self, now: float) -> None:
         if self._position is None or self._quaternion is None:
-            self._publish_rc()
+            self._publish_release()
             return
         amplitude_distance = self._current_amplitude_range()
         if amplitude_distance is not None:
@@ -630,7 +668,7 @@ class SingleHydrophoneHomingController(Node):
             ):
                 self._near_reprobe_count += 1
                 self._reset_localization_for_near_probe(now)
-                self._publish_rc()
+                self._publish_release()
                 return
         if self._source_locked is not None:
             vector_world = self._source_locked - self._position
@@ -666,13 +704,13 @@ class SingleHydrophoneHomingController(Node):
         else:
             if now - self._state_started_wall > 2.0:
                 self._transition("REPROBE")
-            self._publish_rc()
+            self._publish_release()
             return
         estimated_distance = float(np.linalg.norm(vector_world))
         distance = amplitude_distance if amplitude_distance is not None else estimated_distance
         if not math.isfinite(distance) or distance > 80.0:
             self._transition("REPROBE")
-            self._publish_rc()
+            self._publish_release()
             return
         vector_body = world_vector_to_body_flu(vector_world, self._quaternion)
         norm = max(float(np.linalg.norm(vector_body)), 1.0e-9)
@@ -805,6 +843,13 @@ class SingleHydrophoneHomingController(Node):
         msg.channels[5] = self._axis_pwm(lateral)
         self._rc_pub.publish(msg)
 
+    def _publish_release(self) -> None:
+        self._last_requested_command = (0.0, 0.0, 0.0, 0.0)
+        self._last_command = (0.0, 0.0, 0.0, 0.0)
+        msg = OverrideRCIn()
+        msg.channels.fill(OverrideRCIn.CHAN_RELEASE)
+        self._rc_pub.publish(msg)
+
     @classmethod
     def _axis_pwm(cls, value: float) -> int:
         return int(np.clip(round(cls.RC_NEUTRAL + float(np.clip(value, -1.0, 1.0)) * cls.RC_SPAN), 1100, 1900))
@@ -837,20 +882,22 @@ class SingleHydrophoneHomingController(Node):
 
     def _publish_status(self) -> None:
         estimate = self._source_estimate
-        distance = None
+        distance = self._current_estimated_distance()
         source = None
         control_source = self._source_locked if self._source_locked is not None else self._source_smoothed
         if control_source is not None:
             source = [float(value) for value in control_source]
-            if self._position is not None:
-                distance = float(np.linalg.norm(control_source - self._position))
         now = time.monotonic()
+        inputs_ready = self._ready(now)
         payload = {
             "state": self._state,
             "dry_run": self._dry_run,
             "control_output_active": (
-                not self._dry_run and self._vehicle_armed_effective(now)
+                not self._dry_run
+                and inputs_ready
+                and self._state not in {"COMPLETE", "FAILED_TIMEOUT", "FAILED_ESTIMATE"}
             ),
+            "inputs_ready": inputs_ready,
             "connected": self._connected or self._connection_grace_active(now),
             "armed": self._vehicle_armed_effective(now),
             "raw_connected": self._connected,
@@ -903,11 +950,20 @@ class SingleHydrophoneHomingController(Node):
             },
             "bearing_error_deg": math.degrees(self._last_bearing_rad),
             "yaw_rate_rad_s": self._yaw_rate_rad_s,
-            "capture_confirmed": self._capture_confirmed,
             "range_complete": self._range_complete,
+            "arrival_complete": self._arrival_complete,
+            "completion_reason": self._completion_reason,
+            "arrival_radius_m": self._arrival_radius_m,
+            "arrival_hold_s": self._arrival_hold_s,
             "success_range_m": self._success_range_m,
             "success_hold_s": self._success_hold_s,
             "amplitude_range_constant": self._amplitude_range_constant,
+            "active_runtime_s": (
+                None
+                if self._active_started_wall is None
+                else max(0.0, now - self._active_started_wall)
+            ),
+            "max_runtime_s": self._max_runtime_s,
         }
         msg = String()
         msg.data = json.dumps(payload, separators=(",", ":"))
@@ -929,7 +985,7 @@ def main() -> int:
             raise
     finally:
         try:
-            node._publish_rc()
+            node._publish_release()
         except (Exception, KeyboardInterrupt):
             pass
         try:

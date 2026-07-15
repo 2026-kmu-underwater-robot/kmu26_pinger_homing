@@ -26,10 +26,6 @@ function fmtUnit(value, unit, digits = 2) {
   return text === "--" ? "--" : `${text} ${unit}`;
 }
 
-function fmtDeg(rad, digits = 1) {
-  return typeof rad === "number" && Number.isFinite(rad) ? `${fmt((rad * 180) / Math.PI, digits)} deg` : "--";
-}
-
 function inputNumber(id, fallback) {
   const value = Number($(id).value);
   return Number.isFinite(value) ? value : fallback;
@@ -40,20 +36,6 @@ function setPill(id, active, label) {
   el.textContent = label;
   el.classList.toggle("good", active);
   el.classList.toggle("warn", !active);
-}
-
-function missionTopicArgs() {
-  const ros = state.lastStatus?.ros || {};
-  const config = ros.config || {};
-  const topics = config.topics || {};
-  return {
-    pose_topic: topics.odom || "/odometry/filtered",
-    pose_type: "odometry",
-    state_topic: topics.mavros_state || "/mavros/state",
-    yolo_detection_topic: topics.yolo || "/vision/buoy/status",
-    hydrophone_direction_topic: topics.hydrophone_direction || "/homing/direction",
-    mission_status_json: config.mission_status_json || "/tmp/kmu26_mission_fsm_status.json",
-  };
 }
 
 function pingerPayload(dryRun) {
@@ -69,6 +51,9 @@ function pingerPayload(dryRun) {
     forward_max: inputNumber("pinger-forward-max", 0.48),
     yaw_gain: inputNumber("pinger-yaw-gain", 0.85),
     yaw_command_limit: inputNumber("pinger-yaw-limit", 0.42),
+    arrival_radius_m: inputNumber("pinger-arrival-radius", 1.5),
+    arrival_hold_s: inputNumber("pinger-arrival-hold", 1.0),
+    max_runtime_s: inputNumber("pinger-max-runtime", 180),
     success_hold_s: inputNumber("pinger-success-hold", 0.8),
     success_range_m: inputNumber("pinger-success-range", 0),
     amplitude_range_constant: inputNumber("pinger-range-constant", 0),
@@ -109,33 +94,23 @@ function bindControls() {
   $("stop-stack").addEventListener("click", () => {
     postJson("/api/stack/stop").catch(showError);
   });
-  $("run-preflight").addEventListener("click", () => {
-    postJson("/api/mission/preflight", {
-      ...missionTopicArgs(),
-      smoke: true,
-      echo: false,
-    }).catch(showError);
-  });
-  $("start-mission-dry").addEventListener("click", () => {
-    postJson("/api/mission/start", {
-      ...missionTopicArgs(),
-      dry_run: true,
-      pinger_homing: false,
-    }).catch(showError);
-  });
-  $("start-mission-live").addEventListener("click", () => {
-    if (!window.confirm("Start live mission control with command output enabled?")) return;
-    postJson("/api/mission/start", {
-      ...missionTopicArgs(),
-      dry_run: false,
-      pinger_homing: false,
-    }).catch(showError);
-  });
-  $("stop-mission").addEventListener("click", () => {
-    postJson("/api/mission/stop").catch(showError);
-  });
   $("start-pinger-dry").addEventListener("click", () => {
     postJson("/api/pinger/start", pingerPayload(true)).catch(showError);
+  });
+  $("pinger-preflight").addEventListener("click", () => {
+    postJson("/api/pinger/preflight", pingerPayload(false))
+      .then(renderPingerPreflight)
+      .catch(showError);
+  });
+  $("pinger-set-mode").addEventListener("click", () => {
+    postJson("/api/pinger/mode", { mode: $("pinger-mode").value }).catch(showError);
+  });
+  $("pinger-arm").addEventListener("click", () => {
+    if (!window.confirm("ARM the physical vehicle? Keep the area and propellers clear.")) return;
+    postJson("/api/pinger/arm", { armed: true }).catch(showError);
+  });
+  $("pinger-disarm").addEventListener("click", () => {
+    postJson("/api/pinger/arm", { armed: false }).catch(showError);
   });
   $("start-pinger-live").addEventListener("click", () => {
     if (
@@ -244,12 +219,6 @@ function renderStatus(payload) {
     topics.mavros_state?.alive && ros.mavros_state?.connected,
     topics.mavros_state?.alive && ros.mavros_state?.connected ? "MAVROS ON" : "MAVROS OFF",
   );
-  const missionAlive = Boolean(
-    ros.mission_status?.available &&
-      typeof ros.mission_status?.age === "number" &&
-      ros.mission_status.age <= 2,
-  );
-  setPill("fsm-pill", missionAlive, missionAlive ? "FSM ON" : "FSM OFF");
   const pingerAlive = Boolean(process.pinger_running && topics.pinger_homing?.alive);
   const pingerMode = ros.pinger_homing_status?.dry_run ? "DRY" : "LIVE";
   setPill(
@@ -276,7 +245,6 @@ function renderStatus(payload) {
   renderDvl(dvlConfig, dvlEvents);
   renderBag(process);
   renderTopics(topics);
-  renderMission(process, ros);
   renderPinger(process, ros);
   renderPath(ros.path || []);
   $("log-output").textContent = (process.logs || []).join("\n");
@@ -362,69 +330,24 @@ function renderDvl(config, events) {
     .join("\n");
 }
 
-function renderMission(process, ros) {
-  const mavros = ros.mavros_state || {};
-  const mission = ros.mission_status || {};
-  const pinger = ros.pinger_homing_status || {};
-  const yolo = ros.yolo_status || {};
-  const hydro = ros.hydrophone_direction || {};
-  const logs = process.logs || [];
-
-  $("mavros-state").textContent = `${mavros.connected ? "connected" : "disconnected"} | ${
-    mavros.armed ? "armed" : "disarmed"
-  } | ${mavros.mode || "--"}`;
-  $("mission-process").textContent = [
-    process.mission_running ? "mission running" : "mission stopped",
-    process.preflight_running ? "preflight running" : "preflight stopped",
-  ].join(" | ");
-  $("mission-fsm-state").textContent = mission.available ? mission.state || "--" : "no status";
-  $("mission-robot-state").textContent =
-    mission.robot_state_label || mission.robot_state || mission.mode || "--";
-  $("mission-target").textContent = [mission.target_id, mission.target_class].filter(Boolean).join(" | ") || "--";
-  $("mission-counts").textContent = mission.available
-    ? `rem ${mission.remaining_attached ?? "--"} | ok ${mission.processed_count ?? "--"} | col ${
-        mission.collected_count ?? "--"
-      } | score ${mission.scored_count ?? "--"} | fail ${mission.failed_count ?? "--"}`
-    : "--";
-  $("pinger-state").textContent =
-    pinger.state || pinger.estimated_distance_m != null || pinger.bearing_error_deg != null
-      ? `${pinger.state || "--"} | range ${fmtUnit(
-          pinger.amplitude_distance_m ?? pinger.estimated_distance_m,
-          "m",
-        )} | bearing ${fmtUnit(pinger.bearing_error_deg, "deg", 1)}`
-      : "--";
-  $("yolo-state").textContent =
-    yolo.active || yolo.count
-      ? `${yolo.active ? "active" : "idle"} | count ${yolo.count || 0} | ${yolo.target || "--"}`
-      : "--";
-  $("hydrophone-state").textContent =
-    hydro.bearing_rad != null
-      ? `bearing ${fmtDeg(hydro.bearing_rad)} | vec ${fmt(hydro.x)}, ${fmt(hydro.y)}, ${fmt(hydro.z)}`
-      : "--";
-  $("mission-status-file").textContent = mission.available
-    ? `${mission.path || "--"} | age ${fmtUnit(mission.age, "s", 1)}`
-    : mission.path || "--";
-
-  $("mission-log-output").textContent = logs
-    .filter(
-      (line) =>
-        line.includes("[mission_fsm]") ||
-        line.includes("[preflight]") ||
-        line.includes("ground_truth_buoy") ||
-        line.includes("pinger_homing") ||
-        line.includes("real_vehicle_preflight"),
-    )
-    .join("\n");
-}
-
 function formatCommand(command) {
   if (!command || typeof command !== "object") return "--";
   return `F ${fmt(command.forward)} | L ${fmt(command.lateral)} | H ${fmt(command.heave)} | Y ${fmt(command.yaw)}`;
 }
 
+function renderPingerPreflight(result) {
+  const failed = (result.checks || []).filter((check) => !check.ok);
+  $("pinger-preflight-result").textContent = result.ok
+    ? "READY"
+    : failed.map((check) => check.detail).join(" | ") || "NOT READY";
+  $("pinger-preflight-result").classList.toggle("good", Boolean(result.ok));
+  $("pinger-preflight-result").classList.toggle("warn", !result.ok);
+}
+
 function renderPinger(process, ros) {
   const pinger = ros.pinger_homing_status || {};
   const topics = ros.topics || {};
+  const mux = ros.rc_mux_status || {};
   const depthSafety = pinger.depth_safety || {};
   const estimate = Array.isArray(pinger.estimated_source_world)
     ? pinger.estimated_source_world.map((value) => fmt(Number(value))).join(", ")
@@ -439,6 +362,9 @@ function renderPinger(process, ros) {
       : pinger.control_output_active
         ? "LIVE · RC ACTIVE"
         : "LIVE · waiting for ARMED";
+  $("pinger-mux-state").textContent = `${mux.owner || "unknown"} | ${
+    mux.conflict ? "CONFLICT" : mux.output_enabled ? "output enabled" : "output blocked"
+  } | pubs ${mux.publisher_count ?? 0}`;
   $("pinger-controller-state").textContent = pinger.state || "--";
   $("pinger-input-state").textContent = [
     `odom ${topics.odom?.alive ? "OK" : "stale"}`,
@@ -468,9 +394,13 @@ function renderPinger(process, ros) {
   $("pinger-samples").textContent = `${pinger.sample_count ?? 0} samples | probe ${pinger.probe_attempt ?? 0} / ${
     pinger.minimum_probe_legs ?? 0
   }`;
-  $("pinger-result").textContent = `range ${pinger.range_complete ? "complete" : "pending"} | capture ${
-    pinger.capture_confirmed ? "confirmed" : "pending"
-  } | IQ K ${fmt(pinger.amplitude_range_constant, 3)}`;
+  $("pinger-result").textContent = `arrival ${pinger.arrival_complete ? "complete" : "pending"} | calibrated range ${
+    pinger.range_complete ? "complete" : "pending"
+  } | ${pinger.completion_reason || "running"} | runtime ${fmtUnit(pinger.active_runtime_s, "s", 1)} / ${fmtUnit(
+    pinger.max_runtime_s,
+    "s",
+    0,
+  )} | IQ K ${fmt(pinger.amplitude_range_constant, 3)}`;
   $("pinger-log-output").textContent = (process.logs || [])
     .filter(
       (line) =>
@@ -657,5 +587,7 @@ bindControls();
 const initialTab = window.location.hash.slice(1);
 if (initialTab && document.querySelector(`[data-tab="${initialTab}"]`)) {
   showTab(initialTab);
+} else {
+  showTab("pinger");
 }
 connectStatusSocket();

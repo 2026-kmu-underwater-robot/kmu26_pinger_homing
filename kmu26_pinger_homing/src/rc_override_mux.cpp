@@ -93,23 +93,19 @@ class RcOverrideMux final : public rclcpp::Node {
 
   void publish_selected() {
     const auto now = Clock::now();
+    const auto publisher_count = get_publishers_info_by_topic(output_topic_).size();
     if (require_exclusive_output_) {
       if (age_seconds(started_, now) < output_discovery_grace_s_) return;
-      const auto publishers = get_publishers_info_by_topic(output_topic_);
-      if (publishers.size() > 1) {
+      if (publisher_count > 1) {
         if (!output_conflict_) {
           output_conflict_ = true;
           last_owner_ = "conflict";
-          std_msgs::msg::String status;
-          status.data = "{\"owner\":\"conflict\",\"output_topic\":\"" +
-                        output_topic_ + "\",\"publisher_count\":" +
-                        std::to_string(publishers.size()) + "}";
-          status_pub_->publish(status);
           RCLCPP_ERROR(
               get_logger(),
               "RC override output conflict: %zu publishers on %s; publishing is disabled",
-              publishers.size(), output_topic_.c_str());
+              publisher_count, output_topic_.c_str());
         }
+        publish_status_if_due(now, "conflict", publisher_count, false, true);
         return;
       }
       if (output_conflict_) {
@@ -140,13 +136,27 @@ class RcOverrideMux final : public rclcpp::Node {
     }
     output_pub_->publish(output);
 
-    if (owner != last_owner_) {
-      std_msgs::msg::String status;
-      status.data = "{\"owner\":\"" + owner + "\",\"output_topic\":\"" + output_topic_ + "\"}";
-      status_pub_->publish(status);
+    const bool owner_changed = owner != last_owner_;
+    if (owner_changed) {
       RCLCPP_INFO(get_logger(), "RC override owner: %s", owner.c_str());
       last_owner_ = owner;
     }
+    publish_status_if_due(now, owner, publisher_count, true, false, owner_changed);
+  }
+
+  void publish_status_if_due(
+      const Clock::time_point &now, const std::string &owner,
+      std::size_t publisher_count, bool output_enabled, bool conflict,
+      bool force = false) {
+    if (!force && age_seconds(last_status_publish_, now) < 0.20) return;
+    std_msgs::msg::String status;
+    status.data =
+        "{\"owner\":\"" + owner + "\",\"output_topic\":\"" + output_topic_ +
+        "\",\"publisher_count\":" + std::to_string(publisher_count) +
+        ",\"output_enabled\":" + (output_enabled ? "true" : "false") +
+        ",\"conflict\":" + (conflict ? "true" : "false") + "}";
+    status_pub_->publish(status);
+    last_status_publish_ = now;
   }
 
   std::string output_topic_;
@@ -157,6 +167,7 @@ class RcOverrideMux final : public rclcpp::Node {
   bool output_conflict_{false};
   double output_discovery_grace_s_{1.0};
   Clock::time_point started_{Clock::now()};
+  Clock::time_point last_status_publish_{};
   std::vector<Source> sources_;
   rclcpp::Publisher<Override>::SharedPtr output_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;

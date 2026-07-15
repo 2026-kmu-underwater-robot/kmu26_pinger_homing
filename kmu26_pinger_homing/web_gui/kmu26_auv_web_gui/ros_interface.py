@@ -4,7 +4,6 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import rclpy
 from dvl_msgs.msg import CommandResponse
@@ -14,6 +13,8 @@ from geometry_msgs.msg import PoseWithCovarianceStamped
 from geometry_msgs.msg import TwistWithCovarianceStamped
 from geometry_msgs.msg import Vector3Stamped
 from mavros_msgs.msg import State
+from mavros_msgs.srv import CommandBool
+from mavros_msgs.srv import SetMode
 from rclpy.executors import ExternalShutdownException
 from rclpy.executors import SingleThreadedExecutor
 from nav_msgs.msg import Odometry
@@ -21,6 +22,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import BatteryState
 from sensor_msgs.msg import Imu
 from sensor_msgs.msg import Joy
+from std_msgs.msg import Float64
 from std_msgs.msg import String
 
 
@@ -75,15 +77,18 @@ class TopicConfig:
     imu: str = "/mavros/imu/data"
     joy: str = "/joy"
     mavros_state: str = "/mavros/state"
-    yolo: str = "/vision/buoy/status"
     pinger_homing_status: str = "/pinger_homing/status"
     hydrophone_direction: str = "/homing/direction"
-    mission_status_json: str = "/tmp/kmu26_mission_fsm_status.json"
+    delta_range: str = "/audio_phase_estimator/delta_range_m"
+    iq_magnitude: str = "/audio_phase_estimator/iq_magnitude"
+    rc_mux_status: str = "/control/rc_override_mux/status"
+    rc_output: str = "/mavros/rc/override"
+    audio: str = "/audio"
 
 
 class LocalizationRosNode(Node):
     def __init__(self, topic_config: TopicConfig | None = None):
-        super().__init__("kmu26_auv_web_gui_bridge")
+        super().__init__("kmu26_pinger_web_gui_bridge")
         self._topic_config = topic_config or TopicConfig()
         self._lock = threading.Lock()
         self._health = {
@@ -94,9 +99,11 @@ class LocalizationRosNode(Node):
             "joy": TopicHealth(self._topic_config.joy, stale_after=0.5),
             "battery": TopicHealth(self._topic_config.battery, stale_after=3.0),
             "mavros_state": TopicHealth(self._topic_config.mavros_state, stale_after=1.5),
-            "yolo": TopicHealth(self._topic_config.yolo, stale_after=1.5),
             "pinger_homing": TopicHealth(self._topic_config.pinger_homing_status, stale_after=1.5),
             "hydrophone_direction": TopicHealth(self._topic_config.hydrophone_direction, stale_after=1.5),
+            "delta_range": TopicHealth(self._topic_config.delta_range, stale_after=1.5),
+            "iq_magnitude": TopicHealth(self._topic_config.iq_magnitude, stale_after=1.5),
+            "rc_mux": TopicHealth(self._topic_config.rc_mux_status, stale_after=1.0),
         }
         self._pose = {"x": 0.0, "y": 0.0, "z": 0.0, "yaw": 0.0}
         self._velocity = {"x": 0.0, "y": 0.0, "z": 0.0}
@@ -117,13 +124,6 @@ class LocalizationRosNode(Node):
             "present": False,
         }
         self._joy = {"axes": [], "buttons": []}
-        self._yolo_status = {
-            "raw": "",
-            "active": False,
-            "count": 0,
-            "target": "",
-            "range_m": None,
-        }
         self._pinger_homing_status = {
             "raw": "",
             "state": "",
@@ -134,6 +134,14 @@ class LocalizationRosNode(Node):
             "bearing_error_deg": None,
         }
         self._hydrophone_direction = {"x": None, "y": None, "z": None, "bearing_rad": None}
+        self._delta_range_m: float | None = None
+        self._iq_magnitude: float | None = None
+        self._rc_mux_status = {
+            "owner": "unknown",
+            "conflict": False,
+            "output_enabled": False,
+            "publisher_count": 0,
+        }
         self._dvl_config: dict = {}
         self._dvl_events: deque[dict] = deque(maxlen=40)
         self._path: deque[dict[str, float]] = deque(maxlen=1200)
@@ -143,6 +151,8 @@ class LocalizationRosNode(Node):
             self._topic_config.dvl_config_command,
             10,
         )
+        self._arm_client = self.create_client(CommandBool, "/mavros/cmd/arming")
+        self._set_mode_client = self.create_client(SetMode, "/mavros/set_mode")
         self.create_subscription(Odometry, self._topic_config.odom, self._on_odom, 20)
         self.create_subscription(TwistWithCovarianceStamped, self._topic_config.dvl_twist, self._on_dvl, 20)
         self.create_subscription(
@@ -157,7 +167,6 @@ class LocalizationRosNode(Node):
         self.create_subscription(Imu, self._topic_config.imu, self._on_imu, 20)
         self.create_subscription(Joy, self._topic_config.joy, self._on_joy, 20)
         self.create_subscription(State, self._topic_config.mavros_state, self._on_mavros_state, 20)
-        self.create_subscription(String, self._topic_config.yolo, self._on_yolo, 20)
         self.create_subscription(String, self._topic_config.pinger_homing_status, self._on_pinger_homing, 20)
         self.create_subscription(
             Vector3Stamped,
@@ -165,6 +174,9 @@ class LocalizationRosNode(Node):
             self._on_hydrophone_direction,
             20,
         )
+        self.create_subscription(Float64, self._topic_config.delta_range, self._on_delta_range, 50)
+        self.create_subscription(Float64, self._topic_config.iq_magnitude, self._on_iq_magnitude, 50)
+        self.create_subscription(String, self._topic_config.rc_mux_status, self._on_rc_mux_status, 20)
 
     def publish_dvl_command(
         self,
@@ -187,18 +199,28 @@ class LocalizationRosNode(Node):
         )
 
     def snapshot(self) -> dict:
-        mission_status = self._read_mission_status()
+        graph = {
+            "rc_output_publishers": len(
+                self.get_publishers_info_by_topic(self._topic_config.rc_output)
+            ),
+            "audio_publishers": len(
+                self.get_publishers_info_by_topic(self._topic_config.audio)
+            ),
+        }
         with self._lock:
             return {
                 "config": {
                     "topics": {
                         "odom": self._topic_config.odom,
                         "mavros_state": self._topic_config.mavros_state,
-                        "yolo": self._topic_config.yolo,
                         "pinger_homing_status": self._topic_config.pinger_homing_status,
                         "hydrophone_direction": self._topic_config.hydrophone_direction,
+                        "delta_range": self._topic_config.delta_range,
+                        "iq_magnitude": self._topic_config.iq_magnitude,
+                        "rc_mux_status": self._topic_config.rc_mux_status,
+                        "rc_output": self._topic_config.rc_output,
+                        "audio": self._topic_config.audio,
                     },
-                    "mission_status_json": self._topic_config.mission_status_json,
                 },
                 "topics": {name: item.snapshot() for name, item in self._health.items()},
                 "pose": dict(self._pose),
@@ -210,10 +232,12 @@ class LocalizationRosNode(Node):
                     "axes": list(self._joy["axes"]),
                     "buttons": list(self._joy["buttons"]),
                 },
-                "mission_status": mission_status,
-                "yolo_status": dict(self._yolo_status),
                 "pinger_homing_status": dict(self._pinger_homing_status),
                 "hydrophone_direction": dict(self._hydrophone_direction),
+                "delta_range_m": self._delta_range_m,
+                "iq_magnitude": self._iq_magnitude,
+                "rc_mux_status": dict(self._rc_mux_status),
+                "graph": graph,
                 "dvl_config": dict(self._dvl_config),
                 "dvl_events": list(self._dvl_events),
                 "path": list(self._path),
@@ -318,18 +342,6 @@ class LocalizationRosNode(Node):
                 "buttons": list(msg.buttons),
             }
 
-    def _on_yolo(self, msg: String) -> None:
-        parsed = _json_object(msg.data)
-        with self._lock:
-            self._health["yolo"].tick()
-            self._yolo_status = {
-                "raw": msg.data[-600:],
-                "active": bool(parsed.get("active", False)) if parsed else False,
-                "count": int(parsed.get("count", 0)) if isinstance(parsed.get("count", 0), (int, float)) else 0,
-                "target": str(parsed.get("target", parsed.get("target_id", ""))) if parsed else "",
-                "range_m": _number_or_none(parsed.get("range_m")) if parsed else None,
-            }
-
     def _on_pinger_homing(self, msg: String) -> None:
         parsed = _json_object(msg.data)
         with self._lock:
@@ -341,6 +353,7 @@ class LocalizationRosNode(Node):
                 "control_output_active": (
                     bool(parsed.get("control_output_active", False)) if parsed else False
                 ),
+                "inputs_ready": bool(parsed.get("inputs_ready", False)) if parsed else False,
                 "connected": bool(parsed.get("connected", False)) if parsed else False,
                 "armed": bool(parsed.get("armed", False)) if parsed else False,
                 "audio_fresh": bool(parsed.get("audio_fresh", False)) if parsed else False,
@@ -377,10 +390,18 @@ class LocalizationRosNode(Node):
                 "bearing_error_deg": (
                     _number_or_none(parsed.get("bearing_error_deg")) if parsed else None
                 ),
-                "capture_confirmed": (
-                    bool(parsed.get("capture_confirmed", False)) if parsed else False
-                ),
                 "range_complete": bool(parsed.get("range_complete", False)) if parsed else False,
+                "arrival_complete": bool(parsed.get("arrival_complete", False)) if parsed else False,
+                "completion_reason": str(parsed.get("completion_reason", "")) if parsed else "",
+                "arrival_radius_m": (
+                    _number_or_none(parsed.get("arrival_radius_m")) if parsed else None
+                ),
+                "active_runtime_s": (
+                    _number_or_none(parsed.get("active_runtime_s")) if parsed else None
+                ),
+                "max_runtime_s": (
+                    _number_or_none(parsed.get("max_runtime_s")) if parsed else None
+                ),
                 "amplitude_range_constant": (
                     _number_or_none(parsed.get("amplitude_range_constant")) if parsed else None
                 ),
@@ -400,28 +421,46 @@ class LocalizationRosNode(Node):
                 "bearing_rad": bearing,
             }
 
-    def _read_mission_status(self) -> dict:
-        path = Path(self._topic_config.mission_status_json)
-        if not path.exists():
-            return {"available": False, "path": str(path), "age": None}
-        try:
-            stat = path.stat()
-            text = path.read_text(encoding="utf-8")
-            data = json.loads(text)
-        except Exception as exc:
-            return {
-                "available": False,
-                "path": str(path),
-                "age": None,
-                "error": str(exc),
+    def _on_delta_range(self, msg: Float64) -> None:
+        value = _finite_or_none(float(msg.data))
+        with self._lock:
+            self._health["delta_range"].tick()
+            self._delta_range_m = value
+
+    def _on_iq_magnitude(self, msg: Float64) -> None:
+        value = _finite_or_none(float(msg.data))
+        with self._lock:
+            self._health["iq_magnitude"].tick()
+            self._iq_magnitude = value
+
+    def _on_rc_mux_status(self, msg: String) -> None:
+        parsed = _json_object(msg.data)
+        with self._lock:
+            self._health["rc_mux"].tick()
+            self._rc_mux_status = {
+                "owner": str(parsed.get("owner", "unknown")),
+                "conflict": bool(parsed.get("conflict", False)),
+                "output_enabled": bool(parsed.get("output_enabled", False)),
+                "publisher_count": _integer_or_zero(parsed.get("publisher_count")),
             }
-        if not isinstance(data, dict):
-            return {"available": False, "path": str(path), "age": None, "error": "status JSON is not an object"}
-        data = dict(data)
-        data["available"] = True
-        data["path"] = str(path)
-        data["age"] = max(0.0, time.time() - stat.st_mtime)
-        return data
+
+    def set_armed(self, armed: bool) -> bool:
+        if not self._arm_client.wait_for_service(timeout_sec=0.5):
+            self.get_logger().warning("MAVROS arming service is unavailable")
+            return False
+        request = CommandBool.Request()
+        request.value = bool(armed)
+        self._arm_client.call_async(request)
+        return True
+
+    def set_mode(self, mode: str) -> bool:
+        if not self._set_mode_client.wait_for_service(timeout_sec=0.5):
+            self.get_logger().warning("MAVROS set-mode service is unavailable")
+            return False
+        request = SetMode.Request()
+        request.custom_mode = str(mode)
+        self._set_mode_client.call_async(request)
+        return True
 
     def _append_dvl_event(
         self,
@@ -455,7 +494,10 @@ class RosInterface:
 
     def start(self) -> None:
         if not rclpy.ok():
-            rclpy.init(args=None)
+            # The enclosing FastAPI executable has its own CLI flags and may
+            # also be started by launch_ros, which appends --ros-args. The web
+            # bridge does not need either set of process arguments.
+            rclpy.init(args=[])
         self.node = LocalizationRosNode(self.topic_config)
         self._executor = SingleThreadedExecutor()
         self._executor.add_node(self.node)
@@ -500,6 +542,16 @@ class RosInterface:
 
     def reset_dvl_dead_reckoning(self) -> None:
         self.publish_dvl_command("reset_dead_reckoning")
+
+    def set_armed(self, armed: bool) -> bool:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.set_armed(armed)
+
+    def set_mode(self, mode: str) -> bool:
+        if self.node is None:
+            raise RuntimeError("ROS interface is not running")
+        return self.node.set_mode(mode)
 
 
 def _json_object(text: str) -> dict:

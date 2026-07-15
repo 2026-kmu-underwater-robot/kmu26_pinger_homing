@@ -88,7 +88,6 @@ def main() -> int:
         "-p", "delta_range_topic:=/test/pinger/delta",
         "-p", "iq_magnitude_topic:=/test/pinger/iq",
         "-p", "direction_input_topic:=/test/pinger/direction",
-        "-p", "collector_topic:=/test/pinger/collector",
         "-p", "direction_output_topic:=/test/pinger/direction_body",
         "-p", "status_topic:=/test/pinger/status",
         "-p", "rc_output_topic:=/test/pinger/rc",

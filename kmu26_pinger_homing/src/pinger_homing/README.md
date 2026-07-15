@@ -1,17 +1,16 @@
 # Pinger homing
 
-This directory is the single source of truth for the vehicle-side pinger homing controllers.
+This directory is the single source of truth for the vehicle-side pinger homing controller.
 The hydrophone signal-processing algorithm is not copied into this package. It is consumed from
 the team fork of `kmu26_auv_hydrophone` through ROS topics.
 
 ## Controllers
 
-- `single_hydrophone_homing_controller.py`: validated active-range controller. This is the default
-  selected by `mission_fsm_real.launch.py pinger_controller:=active_range`.
+- `single_hydrophone_homing_controller.py`: the installed active-range RC controller.
 - `single_hydrophone_homing_math.py`: moving-sensor 3D source fit, yaw stabilization, automatic
   vertical probe selection, and tank-depth safety functions used by the active controller.
-- `pinger_homing_controller.cpp`: legacy direct direction follower retained for comparison and
-  fallback with `pinger_controller:=direction`.
+- `pinger_homing_controller.cpp`: legacy direction/YOLO prototype retained as source history. It is
+  intentionally not built or installed by `kmu26_pinger_homing`.
 
 The active controller keeps the tested state order:
 
@@ -32,11 +31,10 @@ Inputs from the forked hydrophone package:
 - `/audio_phase_estimator/iq_magnitude` (`std_msgs/Float64`)
 - `/homing/direction` (`geometry_msgs/Vector3Stamped`, optional fit seed)
 
-Vehicle and mission inputs:
+Vehicle inputs:
 
 - `/odometry/filtered` (`nav_msgs/Odometry`)
 - `/mavros/state` (`mavros_msgs/State`)
-- `/collector/state` (`hit25_auv_ros2_msg/CollectorState`)
 
 Outputs:
 
@@ -61,5 +59,6 @@ ros2 launch kmu26_pinger_homing pinger_homing_real.launch.py \
 channel. Live mode does not arm the vehicle and activates output only while `/mavros/state` reports
 armed. The amplitude range relation `(K / iq_magnitude)^2` requires a measured physical calibration;
 the standalone real launch therefore defaults `K=0` and disables metric range completion. The old
-`0.325` value is simulator-only. Its dedicated mux also refuses to publish when another publisher
-already owns `/mavros/rc/override`; stop the mission/joystick controller before standalone homing.
+`0.325` value is simulator-only. Its dedicated mux refuses to publish when another publisher owns
+`/mavros/rc/override`. The patched physical joystick publishes to
+`/control/joystick/rc_override`, has higher mux priority, and releases its input while idle.

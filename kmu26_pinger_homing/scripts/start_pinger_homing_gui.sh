@@ -6,23 +6,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 HOST="${KMU26_WEB_GUI_HOST:-0.0.0.0}"
-PORT="${KMU26_WEB_GUI_PORT:-8080}"
+PORT="${KMU26_WEB_GUI_PORT:-8878}"
 PORT_EXPLICIT=0
 if [[ -n "${KMU26_WEB_GUI_PORT+x}" ]]; then
   PORT_EXPLICIT=1
 fi
 ROBOT_PACKAGE="${KMU26_ROBOT_PACKAGE:-hit25_auv_ros2}"
 ROBOT_LAUNCH="${KMU26_ROBOT_LAUNCH:-localization_test.launch.py}"
-MISSION_PACKAGE="${KMU26_MISSION_PACKAGE:-kmu26_vision_mission_fsm}"
-MISSION_LAUNCH="${KMU26_MISSION_LAUNCH:-mission_fsm_real.launch.py}"
 PINGER_PACKAGE="${KMU26_PINGER_PACKAGE:-kmu26_pinger_homing}"
 PINGER_LAUNCH="${KMU26_PINGER_LAUNCH:-pinger_homing_real.launch.py}"
 ODOM_TOPIC="${KMU26_ODOM_TOPIC:-/odometry/filtered}"
 MAVROS_STATE_TOPIC="${KMU26_MAVROS_STATE_TOPIC:-/mavros/state}"
-YOLO_TOPIC="${KMU26_YOLO_TOPIC:-/vision/buoy/status}"
 PINGER_HOMING_STATUS_TOPIC="${KMU26_PINGER_HOMING_STATUS_TOPIC:-/pinger_homing/status}"
 HYDROPHONE_DIRECTION_TOPIC="${KMU26_HYDROPHONE_DIRECTION_TOPIC:-/homing/direction}"
-MISSION_STATUS_JSON="${KMU26_MISSION_STATUS_JSON:-/tmp/kmu26_mission_fsm_status.json}"
 
 source_if_exists() {
   local setup_file="$1"
@@ -66,7 +62,7 @@ fi
 source_workspace_setup || true
 
 if ! command -v ros2 >/dev/null 2>&1; then
-  echo "[kmu26_auv_web_gui] ros2 command not found."
+  echo "[kmu26_pinger_web_gui] ros2 command not found."
   echo "Source ROS 2 first, or build/source this workspace:"
   echo "  source /opt/ros/humble/setup.bash"
   echo "  source /home/kuuve/catkin_ws/install/setup.bash"
@@ -79,7 +75,7 @@ import sys
 
 missing = [name for name in ("fastapi", "uvicorn", "websockets") if importlib.util.find_spec(name) is None]
 if missing:
-    print("[kmu26_auv_web_gui] Missing Python packages: " + ", ".join(missing))
+    print("[kmu26_pinger_web_gui] Missing Python packages: " + ", ".join(missing))
     print("Install on the Ubuntu robot PC:")
     print("  /usr/bin/python3 -m pip install --user fastapi uvicorn websockets")
     sys.exit(1)
@@ -110,7 +106,7 @@ if is_free(port):
 
 if explicit:
     print(
-        f"[kmu26_auv_web_gui] Port {port} is already in use. "
+        f"[kmu26_pinger_web_gui] Port {port} is already in use. "
         "Stop the existing process or choose another port with KMU26_WEB_GUI_PORT.",
         file=sys.stderr,
     )
@@ -119,23 +115,23 @@ if explicit:
 for candidate in range(port + 1, port + 20):
     if is_free(candidate):
         print(
-            f"[kmu26_auv_web_gui] Port {port} is already in use; using {candidate} instead.",
+            f"[kmu26_pinger_web_gui] Port {port} is already in use; using {candidate} instead.",
             file=sys.stderr,
         )
         print(candidate)
         sys.exit(0)
 
 print(
-    f"[kmu26_auv_web_gui] No free port found from {port} to {port + 19}.",
+    f"[kmu26_pinger_web_gui] No free port found from {port} to {port + 19}.",
     file=sys.stderr,
 )
 sys.exit(1)
 PY
 )"
 
-echo "[kmu26_auv_web_gui] Starting server"
-echo "[kmu26_auv_web_gui] Open from Mac: http://<ubuntu-robot-ip>:${PORT}"
-echo "[kmu26_auv_web_gui] Host=${HOST} Port=${PORT}"
+echo "[kmu26_pinger_web_gui] Starting server"
+echo "[kmu26_pinger_web_gui] Open from Mac: http://<ubuntu-robot-ip>:${PORT}"
+echo "[kmu26_pinger_web_gui] Host=${HOST} Port=${PORT}"
 
 if ros2 pkg prefix kmu26_pinger_homing >/dev/null 2>&1; then
   exec ros2 run kmu26_pinger_homing pinger_web_gui \
@@ -143,16 +139,12 @@ if ros2 pkg prefix kmu26_pinger_homing >/dev/null 2>&1; then
     --port "${PORT}" \
     --robot-package "${ROBOT_PACKAGE}" \
     --robot-launch "${ROBOT_LAUNCH}" \
-    --mission-package "${MISSION_PACKAGE}" \
-    --mission-launch "${MISSION_LAUNCH}" \
     --pinger-package "${PINGER_PACKAGE}" \
     --pinger-launch "${PINGER_LAUNCH}" \
     --odom-topic "${ODOM_TOPIC}" \
     --mavros-state-topic "${MAVROS_STATE_TOPIC}" \
-    --yolo-topic "${YOLO_TOPIC}" \
     --pinger-homing-status-topic "${PINGER_HOMING_STATUS_TOPIC}" \
-    --hydrophone-direction-topic "${HYDROPHONE_DIRECTION_TOPIC}" \
-    --mission-status-json "${MISSION_STATUS_JSON}"
+    --hydrophone-direction-topic "${HYDROPHONE_DIRECTION_TOPIC}"
 fi
 
 export PYTHONPATH="${PACKAGE_DIR}/web_gui:${PYTHONPATH:-}"
@@ -162,13 +154,9 @@ exec python3 -m kmu26_auv_web_gui.server \
   --port "${PORT}" \
   --robot-package "${ROBOT_PACKAGE}" \
   --robot-launch "${ROBOT_LAUNCH}" \
-  --mission-package "${MISSION_PACKAGE}" \
-  --mission-launch "${MISSION_LAUNCH}" \
   --pinger-package "${PINGER_PACKAGE}" \
   --pinger-launch "${PINGER_LAUNCH}" \
   --odom-topic "${ODOM_TOPIC}" \
   --mavros-state-topic "${MAVROS_STATE_TOPIC}" \
-  --yolo-topic "${YOLO_TOPIC}" \
   --pinger-homing-status-topic "${PINGER_HOMING_STATUS_TOPIC}" \
-  --hydrophone-direction-topic "${HYDROPHONE_DIRECTION_TOPIC}" \
-  --mission-status-json "${MISSION_STATUS_JSON}"
+  --hydrophone-direction-topic "${HYDROPHONE_DIRECTION_TOPIC}"

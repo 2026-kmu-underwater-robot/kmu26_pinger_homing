@@ -47,12 +47,20 @@ class ManagedProcess:
 
         self._log(f"[{self.name}] stopping")
         try:
-            os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+            # ros2 launch and rosbag both handle SIGINT as a graceful stop.
+            # This gives the controller a chance to publish CHAN_RELEASE before
+            # the mux and launch process exit.
+            os.killpg(os.getpgid(self.process.pid), signal.SIGINT)
             self.process.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
-            self._log(f"[{self.name}] force killing")
-            os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-            self.process.wait(timeout=2.0)
+            self._log(f"[{self.name}] graceful stop timed out; terminating")
+            os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+            try:
+                self.process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                self._log(f"[{self.name}] force killing")
+                os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+                self.process.wait(timeout=2.0)
 
     @property
     def is_running(self) -> bool:
@@ -78,22 +86,16 @@ class ProcessManager:
         self,
         robot_package: str = "hit25_auv_ros2",
         robot_launch: str = "localization_test.launch.py",
-        mission_package: str = "kmu26_vision_mission_fsm",
-        mission_launch: str = "mission_fsm_real.launch.py",
         pinger_package: str = "kmu26_pinger_homing",
         pinger_launch: str = "pinger_homing_real.launch.py",
     ):
         self.robot_package = robot_package
         self.robot_launch = robot_launch
-        self.mission_package = mission_package
-        self.mission_launch = mission_launch
         self.pinger_package = pinger_package
         self.pinger_launch = pinger_launch
         self.logs: deque[str] = deque(maxlen=500)
         self._stack: ManagedProcess | None = None
-        self._mission: ManagedProcess | None = None
         self._pinger: ManagedProcess | None = None
-        self._preflight: ManagedProcess | None = None
         self._bag: ManagedProcess | None = None
         self._bag_output: str = ""
 
@@ -113,36 +115,9 @@ class ProcessManager:
         if self._stack:
             self._stack.stop()
 
-    def start_mission(self, launch_args: dict[str, str] | None = None) -> None:
-        if self._mission and self._mission.is_running:
-            raise RuntimeError("mission FSM is already running")
-        if self._pinger and self._pinger.is_running:
-            raise RuntimeError("stop standalone pinger homing before starting the mission FSM")
-        args = {
-            "use_rviz": "false",
-            "use_mission_rviz_visualizer": "true",
-            "use_mission_fsm": "true",
-            "dry_run": "true",
-            "require_live_status": "false",
-        }
-        args.update(launch_args or {})
-        cmd = ["ros2", "launch", self.mission_package, self.mission_launch]
-        for key, value in args.items():
-            if value != "":
-                cmd.append(f"{key}:={value}")
-
-        self._mission = ManagedProcess("mission_fsm", cmd, self.logs)
-        self._mission.start()
-
-    def stop_mission(self) -> None:
-        if self._mission:
-            self._mission.stop()
-
     def start_pinger(self, launch_args: dict[str, str] | None = None) -> None:
         if self._pinger and self._pinger.is_running:
             raise RuntimeError("pinger homing is already running")
-        if self._mission and self._mission.is_running:
-            raise RuntimeError("stop the mission FSM before starting standalone pinger homing")
         args = {
             "dry_run": "true",
             "use_audio_capture": "false",
@@ -160,18 +135,6 @@ class ProcessManager:
     def stop_pinger(self) -> None:
         if self._pinger:
             self._pinger.stop()
-
-    def start_preflight(self, args: Iterable[str] | None = None) -> None:
-        if self._preflight and self._preflight.is_running:
-            raise RuntimeError("preflight is already running")
-        cmd = ["ros2", "run", self.mission_package, "real_vehicle_preflight.sh"]
-        cmd.extend(args or [])
-        self._preflight = ManagedProcess("preflight", cmd, self.logs)
-        self._preflight.start()
-
-    def stop_preflight(self) -> None:
-        if self._preflight:
-            self._preflight.stop()
 
     def start_bag(
         self,
@@ -217,9 +180,7 @@ class ProcessManager:
     def status(self) -> dict:
         return {
             "stack_running": bool(self._stack and self._stack.is_running),
-            "mission_running": bool(self._mission and self._mission.is_running),
             "pinger_running": bool(self._pinger and self._pinger.is_running),
-            "preflight_running": bool(self._preflight and self._preflight.is_running),
             "bag_running": bool(self._bag and self._bag.is_running),
             "bag_output": self._bag_output,
             "logs": list(self.logs)[-80:],
@@ -227,7 +188,5 @@ class ProcessManager:
 
     def stop_all(self) -> None:
         self.stop_bag()
-        self.stop_preflight()
         self.stop_pinger()
-        self.stop_mission()
         self.stop_stack()

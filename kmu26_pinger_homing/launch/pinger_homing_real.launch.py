@@ -26,7 +26,6 @@ def generate_launch_description() -> LaunchDescription:
     delta_range_topic = LaunchConfiguration("delta_range_topic")
     iq_magnitude_topic = LaunchConfiguration("iq_magnitude_topic")
     direction_topic = LaunchConfiguration("direction_topic")
-    collector_topic = LaunchConfiguration("collector_topic")
     status_topic = LaunchConfiguration("status_topic")
     direction_output_topic = LaunchConfiguration("direction_output_topic")
     pinger_rc_topic = LaunchConfiguration("pinger_rc_topic")
@@ -53,7 +52,6 @@ def generate_launch_description() -> LaunchDescription:
             "iq_magnitude_topic", default_value="/audio_phase_estimator/iq_magnitude"
         ),
         DeclareLaunchArgument("direction_topic", default_value="/homing/direction"),
-        DeclareLaunchArgument("collector_topic", default_value="/collector/state"),
         DeclareLaunchArgument("status_topic", default_value="/pinger_homing/status"),
         DeclareLaunchArgument(
             "direction_output_topic", default_value="/pinger_homing/direction_body"
@@ -69,7 +67,9 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("tank_max_depth_m", default_value="11.0"),
         DeclareLaunchArgument("success_range_m", default_value="0.0"),
         DeclareLaunchArgument("success_hold_s", default_value="0.8"),
-        DeclareLaunchArgument("max_runtime_s", default_value="0.0"),
+        DeclareLaunchArgument("arrival_radius_m", default_value="1.5"),
+        DeclareLaunchArgument("arrival_hold_s", default_value="1.0"),
+        DeclareLaunchArgument("max_runtime_s", default_value="180.0"),
         DeclareLaunchArgument(
             "amplitude_range_constant",
             default_value="0.0",
@@ -133,7 +133,6 @@ def generate_launch_description() -> LaunchDescription:
             "delta_range_topic": delta_range_topic,
             "iq_magnitude_topic": iq_magnitude_topic,
             "direction_input_topic": direction_topic,
-            "collector_topic": collector_topic,
             "direction_output_topic": direction_output_topic,
             "status_topic": status_topic,
             "rc_output_topic": pinger_rc_topic,
@@ -154,6 +153,12 @@ def generate_launch_description() -> LaunchDescription:
             "success_hold_s": ParameterValue(
                 LaunchConfiguration("success_hold_s"), value_type=float
             ),
+            "arrival_radius_m": ParameterValue(
+                LaunchConfiguration("arrival_radius_m"), value_type=float
+            ),
+            "arrival_hold_s": ParameterValue(
+                LaunchConfiguration("arrival_hold_s"), value_type=float
+            ),
             "max_runtime_s": ParameterValue(
                 LaunchConfiguration("max_runtime_s"), value_type=float
             ),
@@ -171,9 +176,9 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[{
             "output_topic": rc_topic,
             "pinger_topic": pinger_rc_topic,
-            # Standalone homing must never relay an already-running mission,
-            # joystick, or vision controller through a second MAVROS publisher.
-            "joystick_topic": "/pinger_homing/disabled/joystick_rc_override",
+            # The physical joystick has higher mux priority than autonomous
+            # pinger homing so the operator can take over immediately.
+            "joystick_topic": "/control/joystick/rc_override",
             "mission_topic": "/pinger_homing/disabled/mission_rc_override",
             "vision_topic": "/pinger_homing/disabled/vision_rc_override",
             "require_exclusive_output": True,
