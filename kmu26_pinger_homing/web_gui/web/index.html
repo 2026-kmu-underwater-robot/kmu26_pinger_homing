@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>KMU26 AUV Web GUI</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <div>
+          <h1>KMU26 AUV Web GUI</h1>
+          <p id="connection-state">Connecting...</p>
+        </div>
+        <div class="status-pills">
+          <span id="stack-pill" class="pill">STACK</span>
+          <span id="bag-pill" class="pill">BAG</span>
+          <span id="mavros-pill" class="pill">MAVROS</span>
+          <span id="fsm-pill" class="pill">FSM</span>
+          <span id="pinger-pill" class="pill">PINGER</span>
+          <span id="joy-pill" class="pill">JOY</span>
+          <span id="battery-pill" class="pill">BAT</span>
+        </div>
+      </header>
+
+      <section class="controls">
+        <button id="start-stack" class="primary">Start Robot Stack</button>
+        <button id="stop-stack">Stop Robot Stack</button>
+      </section>
+
+      <section class="tabs" role="tablist">
+        <button id="dashboard-tab-button" class="tab-button active" data-tab="dashboard" role="tab">Dashboard</button>
+        <button id="mission-tab-button" class="tab-button" data-tab="mission" role="tab">Mission</button>
+        <button id="pinger-tab-button" class="tab-button" data-tab="pinger" role="tab">Pinger Homing</button>
+        <button id="bag-tab-button" class="tab-button" data-tab="bag" role="tab">Rosbag</button>
+        <button id="ekf-tab-button" class="tab-button" data-tab="ekf" role="tab">EKF Params</button>
+      </section>
+
+      <section id="dashboard-tab" class="tab-view active">
+      <section class="grid">
+        <article class="panel telemetry">
+          <h2>Telemetry</h2>
+          <dl>
+            <div>
+              <dt>Position</dt>
+              <dd id="pose-value">0.00, 0.00, 0.00</dd>
+            </div>
+            <div>
+              <dt>Yaw</dt>
+              <dd id="yaw-value">0.0 deg</dd>
+            </div>
+            <div>
+              <dt>DVL Velocity</dt>
+              <dd id="velocity-value">0.00, 0.00, 0.00</dd>
+            </div>
+            <div>
+              <dt>Depth Z</dt>
+              <dd id="depth-value">0.00 m</dd>
+            </div>
+            <div>
+              <dt>Battery Voltage</dt>
+              <dd id="battery-voltage">--</dd>
+            </div>
+            <div>
+              <dt>Battery Current</dt>
+              <dd id="battery-current">--</dd>
+            </div>
+            <div>
+              <dt>Battery SOC</dt>
+              <dd id="battery-soc">--</dd>
+            </div>
+            <div>
+              <dt>Battery Temp</dt>
+              <dd id="battery-temp">--</dd>
+            </div>
+          </dl>
+        </article>
+
+        <article class="panel topics">
+          <h2>Topic Health</h2>
+          <div id="topic-list" class="topic-list"></div>
+        </article>
+
+        <article class="panel dvl-panel">
+          <h2>DVL Commands</h2>
+          <div class="dvl-command-grid">
+            <button data-dvl-command="get_config">Get Config</button>
+            <button data-dvl-command="set_config" data-dvl-param="acoustic_enabled" data-dvl-value="true">Acoustic On</button>
+            <button data-dvl-command="set_config" data-dvl-param="acoustic_enabled" data-dvl-value="false">Acoustic Off</button>
+            <button data-dvl-command="set_config" data-dvl-param="dark_mode_enabled" data-dvl-value="true">Dark On</button>
+            <button data-dvl-command="set_config" data-dvl-param="dark_mode_enabled" data-dvl-value="false">Dark Off</button>
+            <button data-dvl-command="set_config" data-dvl-param="range_mode" data-dvl-value="auto">Range Auto</button>
+            <button data-dvl-command="set_config" data-dvl-param="range_mode" data-dvl-value="1">Range 1</button>
+            <button data-dvl-command="calibrate_gyro">Calibrate Gyro</button>
+            <button data-dvl-command="reset_dead_reckoning" class="danger">Reset DR</button>
+          </div>
+          <dl class="dvl-config">
+            <div>
+              <dt>Updated</dt>
+              <dd id="dvl-updated">--</dd>
+            </div>
+            <div>
+              <dt>Range</dt>
+              <dd id="dvl-range">--</dd>
+            </div>
+            <div>
+              <dt>Acoustic</dt>
+              <dd id="dvl-acoustic">--</dd>
+            </div>
+            <div>
+              <dt>Dark</dt>
+              <dd id="dvl-dark">--</dd>
+            </div>
+            <div>
+              <dt>Sound</dt>
+              <dd id="dvl-sound">--</dd>
+            </div>
+            <div>
+              <dt>Rotation</dt>
+              <dd id="dvl-rotation">--</dd>
+            </div>
+            <div>
+              <dt>Last</dt>
+              <dd id="dvl-last">--</dd>
+            </div>
+            <div>
+              <dt>Error</dt>
+              <dd id="dvl-error">--</dd>
+            </div>
+          </dl>
+          <pre id="dvl-config-json">--</pre>
+          <pre id="dvl-events"></pre>
+        </article>
+
+        <article class="panel path-panel">
+          <h2>Path</h2>
+          <canvas id="path-canvas" width="640" height="360"></canvas>
+        </article>
+
+        <article class="panel joy-panel">
+          <h2>Joy</h2>
+          <div class="joy-readout">
+            <div>
+              <strong>Axes</strong>
+              <pre id="joy-axes">[]</pre>
+            </div>
+            <div>
+              <strong>Buttons</strong>
+              <pre id="joy-buttons">[]</pre>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel logs">
+          <h2>Logs</h2>
+          <pre id="log-output"></pre>
+        </article>
+      </section>
+      </section>
+
+      <section id="mission-tab" class="tab-view">
+        <section class="grid mission-grid">
+          <article class="panel mission-control-panel">
+            <div class="panel-header">
+              <h2>Mission Control</h2>
+              <div class="panel-actions">
+                <button id="run-preflight">Run Preflight</button>
+                <button id="start-mission-dry" class="primary">Start Dry Run</button>
+                <button id="start-mission-live" class="danger">Start Live</button>
+                <button id="stop-mission">Stop Mission</button>
+              </div>
+            </div>
+            <dl class="mission-status">
+              <div>
+                <dt>MAVROS</dt>
+                <dd id="mavros-state">--</dd>
+              </div>
+              <div>
+                <dt>Mission Process</dt>
+                <dd id="mission-process">--</dd>
+              </div>
+              <div>
+                <dt>FSM State</dt>
+                <dd id="mission-fsm-state">--</dd>
+              </div>
+              <div>
+                <dt>Robot State</dt>
+                <dd id="mission-robot-state">--</dd>
+              </div>
+              <div>
+                <dt>Target</dt>
+                <dd id="mission-target">--</dd>
+              </div>
+              <div>
+                <dt>Counts</dt>
+                <dd id="mission-counts">--</dd>
+              </div>
+              <div>
+                <dt>Pinger</dt>
+                <dd id="pinger-state">--</dd>
+              </div>
+              <div>
+                <dt>YOLO</dt>
+                <dd id="yolo-state">--</dd>
+              </div>
+              <div>
+                <dt>Hydrophone</dt>
+                <dd id="hydrophone-state">--</dd>
+              </div>
+              <div>
+                <dt>Status File</dt>
+                <dd id="mission-status-file">--</dd>
+              </div>
+            </dl>
+          </article>
+
+          <article class="panel mission-log-panel">
+            <h2>Mission / Preflight Logs</h2>
+            <pre id="mission-log-output"></pre>
+          </article>
+        </section>
+      </section>
+
+      <section id="pinger-tab" class="tab-view">
+        <section class="grid pinger-grid">
+          <article class="panel pinger-control-panel">
+            <div class="panel-header">
+              <div>
+                <h2>Real-vehicle Pinger Homing</h2>
+                <p class="panel-note">Dry Run은 추정과 제어 계산만 수행하고 MAVROS RC 채널을 모두 release합니다.</p>
+              </div>
+              <div class="panel-actions">
+                <button id="start-pinger-dry" class="primary">Start Dry Run</button>
+                <button id="start-pinger-live" class="danger">Start Live RC</button>
+                <button id="stop-pinger">Stop</button>
+              </div>
+            </div>
+
+            <div class="pinger-option-row">
+              <label class="check-field">
+                <input id="pinger-use-estimator" type="checkbox" checked />
+                <span>Run hydrophone estimator</span>
+              </label>
+              <label class="check-field">
+                <input id="pinger-use-capture" type="checkbox" />
+                <span>Start audio capture</span>
+              </label>
+            </div>
+
+            <div class="field-grid">
+              <label><span>Audio device</span><input id="pinger-audio-device" type="text" placeholder="ALSA device (optional)" /></label>
+              <label><span>Reference frequency</span><input id="pinger-reference-frequency" type="number" value="21164" min="1000" max="100000" step="1" /></label>
+              <label><span>Tank max depth</span><input id="pinger-tank-depth" type="number" value="11.0" min="0.5" max="50" step="0.1" /></label>
+              <label><span>Control rate</span><input id="pinger-rate" type="number" value="30" min="1" max="120" step="1" /></label>
+              <label><span>Forward max</span><input id="pinger-forward-max" type="number" value="0.48" min="0.05" max="0.8" step="0.01" /></label>
+              <label><span>Yaw gain</span><input id="pinger-yaw-gain" type="number" value="0.85" min="0.1" max="2" step="0.01" /></label>
+              <label><span>Yaw command limit</span><input id="pinger-yaw-limit" type="number" value="0.42" min="0.05" max="0.7" step="0.01" /></label>
+              <label><span>Success hold</span><input id="pinger-success-hold" type="number" value="0.8" min="0.1" max="10" step="0.1" /></label>
+              <label><span>Success range</span><input id="pinger-success-range" type="number" value="0.0" min="0" max="20" step="0.1" /></label>
+              <label><span>IQ range constant</span><input id="pinger-range-constant" type="number" value="0.0" min="0" max="10" step="0.001" /></label>
+            </div>
+            <p class="safety-note">IQ range constant 0은 실물에서 미보정 절대거리 판정을 끕니다. 실측 보정 전에는 0으로 두십시오. Live RC는 자동 아밍하지 않으며, MAVROS가 실제 armed일 때만 출력됩니다.</p>
+          </article>
+
+          <article class="panel pinger-status-panel">
+            <h2>Pinger Status</h2>
+            <dl class="pinger-status">
+              <div><dt>Process</dt><dd id="pinger-process-state">--</dd></div>
+              <div><dt>Output</dt><dd id="pinger-control-mode">--</dd></div>
+              <div><dt>Controller State</dt><dd id="pinger-controller-state">--</dd></div>
+              <div><dt>Inputs</dt><dd id="pinger-input-state">--</dd></div>
+              <div><dt>Estimate</dt><dd id="pinger-estimate">--</dd></div>
+              <div><dt>Quality</dt><dd id="pinger-quality">--</dd></div>
+              <div><dt>Requested RC</dt><dd id="pinger-requested-command">--</dd></div>
+              <div><dt>Applied RC</dt><dd id="pinger-command">--</dd></div>
+              <div><dt>Depth Safety</dt><dd id="pinger-depth-safety">--</dd></div>
+              <div><dt>Direction Source</dt><dd id="pinger-direction-source">--</dd></div>
+              <div><dt>Samples</dt><dd id="pinger-samples">--</dd></div>
+              <div><dt>Result</dt><dd id="pinger-result">--</dd></div>
+            </dl>
+          </article>
+
+          <article class="panel pinger-log-panel">
+            <h2>Pinger Homing Logs</h2>
+            <pre id="pinger-log-output"></pre>
+          </article>
+        </section>
+      </section>
+
+      <section id="bag-tab" class="tab-view">
+        <article class="panel bag-panel">
+          <div class="panel-header">
+            <h2>Rosbag Recording</h2>
+            <div class="panel-actions">
+              <button id="start-bag" class="primary">Start Bag</button>
+              <button id="stop-bag">Stop Bag</button>
+              <button id="bag-refresh-topics">Refresh Topics</button>
+            </div>
+          </div>
+          <div class="bag-mode">
+            <label>
+              <input type="radio" name="bag-mode" value="all" />
+              <span>All Topics</span>
+            </label>
+            <label>
+              <input type="radio" name="bag-mode" value="selected" checked />
+              <span>Selected Topics</span>
+            </label>
+          </div>
+          <dl class="bag-status">
+            <div>
+              <dt>Status</dt>
+              <dd id="bag-state">--</dd>
+            </div>
+            <div>
+              <dt>Output</dt>
+              <dd id="bag-output">--</dd>
+            </div>
+          </dl>
+          <div id="bag-topic-list" class="bag-topic-list"></div>
+          <pre id="bag-log-output"></pre>
+        </article>
+      </section>
+
+      <section id="ekf-tab" class="tab-view">
+        <article class="panel ekf-panel">
+          <div class="panel-header">
+            <h2>EKF Process Noise</h2>
+            <div class="panel-actions">
+              <button id="ekf-reload">Reload</button>
+              <button id="ekf-save" class="primary">Save</button>
+            </div>
+          </div>
+          <div class="ekf-meta">
+            <span id="ekf-path">--</span>
+            <span id="ekf-save-state">Idle</span>
+          </div>
+          <div id="ekf-diagonal" class="ekf-diagonal"></div>
+          <div id="ekf-matrix" class="ekf-matrix"></div>
+        </article>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

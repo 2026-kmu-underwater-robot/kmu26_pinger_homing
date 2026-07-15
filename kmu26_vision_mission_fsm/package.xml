@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>kmu26_vision_mission_fsm</name>
+  <version>0.2.0</version>
+  <description>Experimental YOLO buoy perception, vision RC controller, and observation-driven mission FSM.</description>
+  <maintainer email="robot@example.com">KMU Underwater Robot Team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>mavros_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>hit25_auv_ros2_msg</depend>
+  <depend>eigen</depend>
+
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-pip</exec_depend>
+  <exec_depend>kmu26_pinger_homing</exec_depend>
+
+  <export><build_type>ament_cmake</build_type></export>
+</package>
