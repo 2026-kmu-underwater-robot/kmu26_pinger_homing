@@ -16,11 +16,14 @@
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
   <depend>visualization_msgs</depend>
+  <depend>hit25_auv_ros2_msg</depend>
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>audio_capture</exec_depend>
   <exec_depend>rviz2</exec_depend>
 
   <test_depend>ament_cmake_gtest</test_depend>

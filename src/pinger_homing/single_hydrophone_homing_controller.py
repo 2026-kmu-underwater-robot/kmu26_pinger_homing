@@ -921,6 +921,12 @@ def main() -> int:
         rclpy.spin(node)
     except (ExternalShutdownException, KeyboardInterrupt):
         pass
+    except Exception:
+        # Humble can surface SIGTERM-driven context shutdown as RCLError from
+        # wait_set instead of ExternalShutdownException. Preserve real runtime
+        # errors, but treat an already-invalid ROS context as normal shutdown.
+        if rclpy.ok():
+            raise
     finally:
         try:
             node._publish_rc()

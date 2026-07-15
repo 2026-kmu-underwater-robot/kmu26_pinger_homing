@@ -6,6 +6,8 @@ Focused ROS 2 package for the KMU26 underwater mission controller.
 
 - `ground_truth_buoy_fsm`: mission FSM and RC/manual/direct command output.
 - `pinger_homing_controller`: hydrophone direction + optional YOLO final-align controller.
+- `single_hydrophone_homing_controller.py`: moving-sensor active-range pinger localizer and real-vehicle RC controller.
+- `rc_override_mux`: exclusive owner of the final `/mavros/rc/override` output.
 - `mission_rviz_visualizer`: RViz marker publisher for FSM state, course boundary, target state, and YOLO view.
 - `fsm_web_gui.py`: dedicated FSM web GUI for mission start/stop, RViz helpers, camera preview, state, RC monitor, and course boundary setup.
 
@@ -93,6 +95,24 @@ Start pinger-only homing:
 ```bash
 ros2 launch kmu26_mission_fsm mission_fsm_real.launch.py use_pinger_homing:=true
 ```
+
+For the validated active-range controller on a real vehicle, use the dedicated
+launch. Start disarmed in dry-run mode and provide the actual pool depth:
+
+```bash
+ros2 launch kmu26_mission_fsm pinger_homing_real.launch.py \
+  dry_run:=true use_audio_capture:=false \
+  use_hydrophone_estimator:=true tank_max_depth_m:=2.0 \
+  amplitude_range_constant:=0.0 success_range_m:=0.0
+```
+
+The controller consumes `/odometry/filtered`, `/mavros/state`,
+`/audio_phase_estimator/delta_range_m`, `/audio_phase_estimator/iq_magnitude`,
+and `/homing/direction`. It publishes to `/control/pinger/rc_override`; the
+dedicated mux is the only node allowed to publish `/mavros/rc/override`.
+Dry-run always publishes `CHAN_RELEASE`. Live mode never arms the vehicle and
+only applies RC while MAVROS reports `armed=true`. Keep the IQ range constant
+and success range at zero until the physical hydrophone has been calibrated.
 
 ## Dedicated FSM GUI
 
