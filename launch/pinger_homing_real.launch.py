@@ -4,7 +4,7 @@
 The hydrophone estimator remains the separately maintained ``audio_capture``
 implementation.  For terminal scan-and-select use
 ``pinger_homing_real_interactive.launch.py``; this fixed-frequency launch is
-also kept for the Web GUI, which already supplies an explicit selected
+also available for a caller that already supplies an explicit selected
 frequency.  Both routes start the estimator at that immutable frequency and
 therefore preserve the hydrophone algorithm.
 """

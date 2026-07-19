@@ -92,9 +92,8 @@ ros2 launch kmu26_pinger_homing pinger_homing_real_interactive.launch.py \
   tank_max_depth_m:=11.0
 ```
 
-Web GUI에서 직접 실행할 때는 입력한 고정 주파수를 쓰고, 현장 스캔·선택은 위 interactive launch를
-사용한다. GUI의 Live RC 버튼은 자동 아밍하지 않고, `/mavros/state`가 armed일 때만
-컨트롤러 출력이 mux를 통해 `/mavros/rc/override`로 전달된다. 실물 IQ-거리 보정 전에는
+현장 스캔·선택은 위 interactive launch를 사용한다. 자동 아밍하지 않고, `/mavros/state`가
+armed이며 required mode일 때만 컨트롤러 출력이 mux를 통해 `/mavros/rc/override`로 전달된다. 실물 IQ-거리 보정 전에는
 `amplitude_range_constant:=0.0`, `success_range_m:=0.0`을 유지한다.
 
 Python 구현은 비교/아카이브용으로 남기며, 설치·수조·실물 launch의 제어기는 canonical

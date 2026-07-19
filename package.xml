@@ -3,12 +3,11 @@
 <package format="3">
   <name>kmu26_pinger_homing</name>
   <version>0.2.0</version>
-  <description>Fork-backed hydrophone estimator integration, active pinger RC control, RC mux, and real-vehicle web GUI.</description>
+  <description>Fork-backed hydrophone estimator integration, active pinger RC control, and RC mux.</description>
   <maintainer email="robot@example.com">KMU Underwater Robot Team</maintainer>
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
-  <buildtool_depend>ament_cmake_python</buildtool_depend>
 
   <depend>rclcpp</depend>
   <depend>audio_common_msgs</depend>

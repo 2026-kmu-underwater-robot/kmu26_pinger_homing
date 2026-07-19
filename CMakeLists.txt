@@ -6,7 +6,6 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
-find_package(ament_cmake_python REQUIRED)
 find_package(audio_common_msgs REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(rclcpp REQUIRED)
@@ -41,11 +40,6 @@ target_link_libraries(pinger_homing_controller Eigen3::Eigen)
 add_executable(rc_override_mux src/rc_override_mux.cpp)
 target_compile_features(rc_override_mux PUBLIC cxx_std_17)
 ament_target_dependencies(rc_override_mux rclcpp mavros_msgs std_msgs)
-
-ament_python_install_package(
-  kmu26_pinger_web_gui
-  PACKAGE_DIR web_gui/kmu26_auv_web_gui
-)
 
 if(BUILD_TESTING)
   enable_testing()
@@ -107,10 +101,7 @@ install(TARGETS
 
 install(PROGRAMS
   src/pinger_homing/single_hydrophone_homing_controller.py
-  scripts/pinger_web_gui
-  scripts/start_pinger_homing_gui.sh
   scripts/start_pinger_homing_test_tank.sh
-  scripts/install_pinger_homing_gui_launcher.sh
   DESTINATION lib/${PROJECT_NAME})
 
 # Keep the math module beside the controller so direct ROS execution can import it.
@@ -122,7 +113,7 @@ install(FILES
   PINGER_HOMING_ARCHITECTURE_KO.md
   DESTINATION share/${PROJECT_NAME})
 
-install(DIRECTORY launch web_gui/web DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY launch DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY src/pinger_homing DESTINATION share/${PROJECT_NAME}/algorithms
   FILES_MATCHING PATTERN "*.md" PATTERN "__pycache__" EXCLUDE)
 

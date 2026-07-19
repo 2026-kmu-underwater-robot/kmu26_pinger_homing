@@ -10,7 +10,6 @@ package.xml                 ROS package manifest
 CMakeLists.txt              ROS package build definition
 launch/                     Phase/SNR/interactive launch files
 src/                        C++ controller and frequency selector
-web_gui/                    Pinger web GUI
 ```
 
 NUC의 최종 소스 경계는 다음과 같다.
@@ -20,8 +19,7 @@ NUC의 최종 소스 경계는 다음과 같다.
 ├── kmu26_pinger_homing/            # 이 Git 저장소 = ROS package root
 │   ├── package.xml
 │   ├── launch/
-│   ├── src/
-│   └── web_gui/
+│   └── src/
 ├── kmu26_auv_hydrophone/           # 별도 Git 저장소, 신호처리 ROS 패키지들
     ├── audio_common/
     ├── audio_common_msgs/
@@ -63,16 +61,9 @@ ros2 launch kmu26_pinger_homing pinger_homing_real_interactive.launch.py \
   dry_run:=true use_audio_capture:=false tank_max_depth_m:=2.0
 ```
 
-핑거 Web GUI:
-
-```bash
-ros2 run kmu26_pinger_homing start_pinger_homing_gui.sh
-```
-
 launch는 5초 뒤 후보 1~5 또는 Hz를 터미널에서 받으며, 선택 주파수로
 기존 hydrophone estimator를 시작한 뒤 canonical C++ no-odometry Phase
-제어기를 실행한다. GUI의 직접 start는 자동 스캔을 하지 않으므로, 실물
-초기 시험은 이 interactive launch를 쓴다. 처음에는 반드시 프로펠러를 제거하고
+제어기를 실행한다. 실물 초기 시험은 이 interactive launch를 쓴다. 처음에는 반드시 프로펠러를 제거하고
 `dry_run:=true`로 토픽과 추정 상태부터 확인한다.
 
 ## test-tank Phase/SNR 핑거 호밍

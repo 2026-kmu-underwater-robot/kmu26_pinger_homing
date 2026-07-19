@@ -2838,8 +2838,8 @@ class PingerHomingController : public rclcpp::Node {
         << ",\"recovery_active\":" << bool_text(depth_recovery_active_) << "}"
         << ",\"bearing_error_deg\":" << (last_bearing_rad_ * 180.0 / kPi)
         << ",\"yaw_rate_rad_s\":" << current_yaw_rate(now)
-        // Retain this legacy status key so an older Web GUI can consume the
-        // standalone controller without a schema exception. Pinger homing no
+        // Retain this legacy status key so older status consumers can read
+        // the standalone controller without a schema exception. Pinger homing no
         // longer subscribes to mission/collector state, so it is always false.
         << ",\"capture_confirmed\":false"
         << ",\"range_complete\":" << bool_text(range_complete_)
