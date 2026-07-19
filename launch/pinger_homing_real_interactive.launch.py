@@ -85,9 +85,14 @@ _REAL_ARGUMENTS = (
     "success_hold_s",
     "arrival_radius_m",
     "arrival_hold_s",
+    "first_lock_confirmation_radius_m",
     "max_runtime_s",
     "amplitude_range_constant",
     "rc_pwm_span",
+    "rc_deadzone_compensation_enabled",
+    "rc_xy_deadzone_pwm",
+    "rc_yaw_deadzone_pwm",
+    "rc_heave_deadzone_pwm",
     "probe_pwm_delta",
     "approach_pwm_delta",
     "legacy_probe_duration_scale",
@@ -116,6 +121,15 @@ def _gui_handoff_requested(context) -> bool:
     if mode in {"true", "1", "on", "yes", "auto"}:
         return True
     raise RuntimeError("gui_rc_handoff must be auto, true, or false")
+
+
+def _auto_select_top_requested(context) -> bool:
+    value = LaunchConfiguration("auto_select_top").perform(context).strip().lower()
+    if value in {"true", "1", "on", "yes"}:
+        return True
+    if value in {"false", "0", "off", "no"}:
+        return False
+    raise RuntimeError("auto_select_top must be true or false")
 
 
 def _handoff_gui_rc_if_available(gate, gate_executor, context) -> None:
@@ -253,23 +267,27 @@ def _start_real_homing_after_selection(context, *args, **kwargs):
                 )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError):
             print("[pinger] frequency scan complete; enter a candidate number or exact Hz.")
+        auto_select_top = _auto_select_top_requested(context)
         scan_min_hz = float(LaunchConfiguration("scan_min_frequency_hz").perform(context))
         scan_max_hz = float(LaunchConfiguration("scan_max_frequency_hz").perform(context))
-        while True:
-            choice = input("[pinger] Enter displayed candidate 1-5 or an exact frequency in Hz: ").strip()
-            try:
-                numeric = float(choice)
-                valid_index = numeric.is_integer() and 1 <= int(numeric) <= len(ranked)
-                valid_frequency = scan_min_hz <= numeric <= scan_max_hz
-                if valid_index or valid_frequency:
-                    break
-            except ValueError:
-                pass
-            print(
-                f"[pinger] Enter a displayed candidate number or "
-                f"{scan_min_hz:.0f}--{scan_max_hz:.0f} Hz."
-            )
-        selection_pub.publish(String(data=choice))
+        if not auto_select_top:
+            while True:
+                choice = input("[pinger] Enter displayed candidate 1-5 or an exact frequency in Hz: ").strip()
+                try:
+                    numeric = float(choice)
+                    valid_index = numeric.is_integer() and 1 <= int(numeric) <= len(ranked)
+                    valid_frequency = scan_min_hz <= numeric <= scan_max_hz
+                    if valid_index or valid_frequency:
+                        break
+                except ValueError:
+                    pass
+                print(
+                    f"[pinger] Enter a displayed candidate number or "
+                    f"{scan_min_hz:.0f}--{scan_max_hz:.0f} Hz."
+                )
+            selection_pub.publish(String(data=choice))
+        else:
+            print("[pinger] simulator parity run: waiting for the strongest qualified FFT candidate")
         # Candidate acquisition and operator response are separate timeout
         # phases. A slow but valid operator choice must still receive a full
         # DDS handoff window after Enter is pressed.
@@ -374,11 +392,16 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("tank_max_depth_m", default_value="11.0"),
         DeclareLaunchArgument("success_range_m", default_value="0.0"),
         DeclareLaunchArgument("success_hold_s", default_value="0.8"),
-        DeclareLaunchArgument("arrival_radius_m", default_value="1.5"),
+        DeclareLaunchArgument("arrival_radius_m", default_value="0.8"),
         DeclareLaunchArgument("arrival_hold_s", default_value="1.0"),
+        DeclareLaunchArgument("first_lock_confirmation_radius_m", default_value="3.0"),
         DeclareLaunchArgument("max_runtime_s", default_value="180.0"),
         DeclareLaunchArgument("amplitude_range_constant", default_value="0.0"),
         DeclareLaunchArgument("rc_pwm_span", default_value="400.0"),
+        DeclareLaunchArgument("rc_deadzone_compensation_enabled", default_value="true"),
+        DeclareLaunchArgument("rc_xy_deadzone_pwm", default_value="30.0"),
+        DeclareLaunchArgument("rc_yaw_deadzone_pwm", default_value="40.0"),
+        DeclareLaunchArgument("rc_heave_deadzone_pwm", default_value="30.0"),
         DeclareLaunchArgument("probe_pwm_delta", default_value="20"),
         DeclareLaunchArgument("approach_pwm_delta", default_value="25"),
         DeclareLaunchArgument("legacy_probe_duration_scale", default_value="1.0"),
@@ -401,6 +424,15 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("selected_frequency_topic", default_value="/pinger_homing/selected_frequency_hz"),
         DeclareLaunchArgument("candidate_topic", default_value="/pinger_homing/frequency_candidates"),
         DeclareLaunchArgument("manual_selection_topic", default_value="/pinger_homing/manual_selection"),
+        DeclareLaunchArgument(
+            "auto_select_top",
+            default_value="false",
+            description=(
+                "Select the strongest qualified FFT candidate without terminal input. "
+                "Keep false on the physical vehicle; the simulator GUI enables it because "
+                "its child launch has no interactive terminal."
+            ),
+        ),
         DeclareLaunchArgument("scan_monitor_s", default_value="10.0"),
         DeclareLaunchArgument("scan_min_frequency_hz", default_value="19000.0"),
         DeclareLaunchArgument("scan_max_frequency_hz", default_value="22000.0"),
@@ -528,7 +560,9 @@ def generate_launch_description() -> LaunchDescription:
             "relative_to_top_snr_db": ParameterValue(
                 LaunchConfiguration("scan_relative_to_top_snr_db"), value_type=float
             ),
-            "auto_select_top": False,
+            "auto_select_top": ParameterValue(
+                LaunchConfiguration("auto_select_top"), value_type=bool
+            ),
             "selected_frequency_topic": LaunchConfiguration("selected_frequency_topic"),
             "candidate_topic": LaunchConfiguration("candidate_topic"),
             "manual_selection_topic": LaunchConfiguration("manual_selection_topic"),

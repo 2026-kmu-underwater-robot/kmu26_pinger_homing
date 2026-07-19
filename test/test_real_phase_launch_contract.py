@@ -27,6 +27,10 @@ def test_real_launch_uses_canonical_cpp_odometry_controller() -> None:
     assert '"motion_response_min_speed_mps"' in launch
     assert '"probe_pwm_delta": ParameterValue(' in launch
     assert '"approach_pwm_delta": ParameterValue(' in launch
+    assert '"rc_deadzone_compensation_enabled": ParameterValue(' in launch
+    assert '"rc_xy_deadzone_pwm": ParameterValue(' in launch
+    assert '"rc_yaw_deadzone_pwm": ParameterValue(' in launch
+    assert '"rc_heave_deadzone_pwm": ParameterValue(' in launch
     assert '"probe_duration_scale": ParameterValue(' in launch
     assert '"rc_output_topic": rc_topic' in launch
     assert 'executable="rc_override_mux"' not in launch
@@ -64,6 +68,14 @@ def test_interactive_launch_scans_then_injects_selected_startup_frequency() -> N
     assert '"scan_max_frequency_hz", default_value="22000.0"' in launch
     assert '"scan_combine_channels", default_value="true"' in launch
     assert '"scan_persistent_min_ratio", default_value="0.30"' in launch
+    assert '"auto_select_top",' in launch
+    assert 'default_value="false"' in launch
+    assert 'DeclareLaunchArgument("rc_deadzone_compensation_enabled", default_value="true")' in launch
+    assert 'DeclareLaunchArgument("rc_xy_deadzone_pwm", default_value="30.0")' in launch
+    assert 'DeclareLaunchArgument("rc_yaw_deadzone_pwm", default_value="40.0")' in launch
+    assert "_auto_select_top_requested(context)" in launch
+    assert 'LaunchConfiguration("auto_select_top"), value_type=bool' in launch
+    assert "if not auto_select_top:" in launch
     assert "96000/16384 = 5.86 Hz bins" in launch
     assert "args=[], context=gate_context" in launch
     assert "SignalHandlerOptions.NO" in launch
@@ -92,6 +104,26 @@ def test_motion_response_adapts_timing_without_becoming_phase_bearing_input() ->
     assert "motion_response_velocity_topic" in controller
 
 
+def test_rc_pwm_contract_compensates_physical_pixhawk_deadzone() -> None:
+    controller = (ROOT / "src" / "pinger_homing" / "pinger_homing_controller.cpp").read_text()
+    assert "effective_delta + std::max(0.0, deadzone_pwm)" in controller
+    assert "if (std::abs(command) <= 1.0e-9) return kRcNeutral" in controller
+    assert '"rc_deadzone_compensation_enabled", true' in controller
+    assert '"rc_xy_deadzone_pwm", 30.0' in controller
+    assert '"rc_yaw_deadzone_pwm", 40.0' in controller
+
+
+def test_uncalibrated_near_first_fit_requires_mirrored_confirmation() -> None:
+    controller = (ROOT / "src" / "pinger_homing" / "pinger_homing_controller.cpp").read_text()
+    real_launch = (ROOT / "launch" / "pinger_homing_real.launch.py").read_text()
+    interactive = (ROOT / "launch" / "pinger_homing_real_interactive.launch.py").read_text()
+    assert '"first_lock_confirmation_radius_m", 3.0' in controller
+    assert "near_first_fit_needs_confirmation" in controller
+    assert "requiring mirrored confirmation before lock" in controller
+    assert 'DeclareLaunchArgument("first_lock_confirmation_radius_m", default_value="3.0")' in real_launch
+    assert '"first_lock_confirmation_radius_m"' in interactive
+
+
 def test_adaptive_phase_reestimate_uses_innovation_not_fixed_cadence() -> None:
     root = Path(__file__).resolve().parents[1]
     controller = (root / "src" / "pinger_homing" / "pinger_homing_controller.cpp").read_text()
@@ -115,4 +147,6 @@ if __name__ == "__main__":
     test_xy_alt_hold_does_not_require_depth_for_a_heave_free_probe()
     test_interactive_launch_scans_then_injects_selected_startup_frequency()
     test_motion_response_adapts_timing_without_becoming_phase_bearing_input()
+    test_rc_pwm_contract_compensates_physical_pixhawk_deadzone()
+    test_uncalibrated_near_first_fit_requires_mirrored_confirmation()
     test_adaptive_phase_reestimate_uses_innovation_not_fixed_cadence()

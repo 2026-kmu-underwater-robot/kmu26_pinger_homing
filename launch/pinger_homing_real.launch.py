@@ -149,8 +149,9 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("tank_max_depth_m", default_value="11.0"),
         DeclareLaunchArgument("success_range_m", default_value="0.0"),
         DeclareLaunchArgument("success_hold_s", default_value="0.8"),
-        DeclareLaunchArgument("arrival_radius_m", default_value="1.5"),
+        DeclareLaunchArgument("arrival_radius_m", default_value="0.8"),
         DeclareLaunchArgument("arrival_hold_s", default_value="1.0"),
+        DeclareLaunchArgument("first_lock_confirmation_radius_m", default_value="3.0"),
         DeclareLaunchArgument("max_runtime_s", default_value="180.0"),
         DeclareLaunchArgument(
             "amplitude_range_constant",
@@ -160,11 +161,14 @@ def generate_launch_description() -> LaunchDescription:
                 "absolute range; simulator calibration is 0.325."
             ),
         ),
-        # Physical Phase profile.  These are PWM deltas from 1500, rather
-        # than a simulator-normalized command.  Keep the initial values small
-        # enough for tethered commissioning and expose every motion timing
-        # needed to tune a particular vehicle.
+        # Physical Phase profile.  Motion deltas are useful authority outside
+        # the Pixhawk RC deadzone.  The controller adds the real RCx_DZ only
+        # for non-neutral commands, making these values portable to SITL.
         DeclareLaunchArgument("rc_pwm_span", default_value="400.0"),
+        DeclareLaunchArgument("rc_deadzone_compensation_enabled", default_value="true"),
+        DeclareLaunchArgument("rc_xy_deadzone_pwm", default_value="30.0"),
+        DeclareLaunchArgument("rc_yaw_deadzone_pwm", default_value="40.0"),
+        DeclareLaunchArgument("rc_heave_deadzone_pwm", default_value="30.0"),
         DeclareLaunchArgument("probe_pwm_delta", default_value="20"),
         DeclareLaunchArgument("approach_pwm_delta", default_value="25"),
         DeclareLaunchArgument(
@@ -310,6 +314,18 @@ def generate_launch_description() -> LaunchDescription:
             "rc_output_topic": rc_topic,
             "rate_hz": ParameterValue(LaunchConfiguration("rate_hz"), value_type=float),
             "rc_pwm_span": ParameterValue(LaunchConfiguration("rc_pwm_span"), value_type=float),
+            "rc_deadzone_compensation_enabled": ParameterValue(
+                LaunchConfiguration("rc_deadzone_compensation_enabled"), value_type=bool
+            ),
+            "rc_xy_deadzone_pwm": ParameterValue(
+                LaunchConfiguration("rc_xy_deadzone_pwm"), value_type=float
+            ),
+            "rc_yaw_deadzone_pwm": ParameterValue(
+                LaunchConfiguration("rc_yaw_deadzone_pwm"), value_type=float
+            ),
+            "rc_heave_deadzone_pwm": ParameterValue(
+                LaunchConfiguration("rc_heave_deadzone_pwm"), value_type=float
+            ),
             "probe_pwm_delta": ParameterValue(
                 LaunchConfiguration("probe_pwm_delta"), value_type=int
             ),
@@ -394,6 +410,9 @@ def generate_launch_description() -> LaunchDescription:
             ),
             "arrival_hold_s": ParameterValue(
                 LaunchConfiguration("arrival_hold_s"), value_type=float
+            ),
+            "first_lock_confirmation_radius_m": ParameterValue(
+                LaunchConfiguration("first_lock_confirmation_radius_m"), value_type=float
             ),
             "max_runtime_s": ParameterValue(
                 LaunchConfiguration("max_runtime_s"), value_type=float

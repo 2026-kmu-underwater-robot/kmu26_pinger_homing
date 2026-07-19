@@ -112,8 +112,19 @@ std::string json_vector(const std::optional<Eigen::Vector3d> &value, int precisi
   return out.str();
 }
 
-int axis_pwm(double value, double span) {
-  return static_cast<int>(std::llround(kRcNeutral + clamp(value, -1.0, 1.0) * span));
+int axis_pwm(double value, double span, double deadzone_pwm) {
+  const double command = clamp(value, -1.0, 1.0);
+  if (std::abs(command) <= 1.0e-9) return kRcNeutral;
+
+  // ArduSub discards RC input inside RCx_DZ.  probe_pwm_delta and
+  // approach_pwm_delta intentionally describe useful authority *outside* that
+  // deadzone so the same launch values have the same meaning on SITL and the
+  // physical Pixhawk.  Keep neutral exactly neutral and cap the compensated
+  // result at the configured RC span.
+  const double effective_delta = std::abs(command) * span;
+  const double raw_delta = std::min(span, effective_delta + std::max(0.0, deadzone_pwm));
+  return static_cast<int>(std::llround(
+      kRcNeutral + std::copysign(raw_delta, command)));
 }
 
 }  // namespace
@@ -578,9 +589,12 @@ class PingerHomingController : public rclcpp::Node {
     success_hold_s_ = std::max(
         0.1, declare_parameter<double>("success_hold_s", 0.8));
     arrival_radius_m_ = std::max(
-        0.0, declare_parameter<double>("arrival_radius_m", 1.5));
+        0.0, declare_parameter<double>("arrival_radius_m", 0.8));
     arrival_hold_s_ = std::max(
         0.1, declare_parameter<double>("arrival_hold_s", 1.0));
+    first_lock_confirmation_radius_m_ = std::max(
+        arrival_radius_m_,
+        declare_parameter<double>("first_lock_confirmation_radius_m", 3.0));
     amplitude_range_constant_ = std::max(
         0.0, declare_parameter<double>("amplitude_range_constant", 0.325));
     // /odometry/filtered is a startup-local frame. Course-map XY limits are
@@ -603,6 +617,14 @@ class PingerHomingController : public rclcpp::Node {
     }
 
     rc_pwm_span_ = clamp(declare_parameter<double>("rc_pwm_span", 400.0), 50.0, 700.0);
+    rc_deadzone_compensation_enabled_ = declare_parameter<bool>(
+        "rc_deadzone_compensation_enabled", true);
+    rc_xy_deadzone_pwm_ = clamp(
+        declare_parameter<double>("rc_xy_deadzone_pwm", 30.0), 0.0, 200.0);
+    rc_yaw_deadzone_pwm_ = clamp(
+        declare_parameter<double>("rc_yaw_deadzone_pwm", 40.0), 0.0, 200.0);
+    rc_heave_deadzone_pwm_ = clamp(
+        declare_parameter<double>("rc_heave_deadzone_pwm", 30.0), 0.0, 200.0);
     const int probe_pwm_override = declare_parameter<int>("probe_pwm_delta", 0);
     const int approach_pwm_override = declare_parameter<int>("approach_pwm_delta", 0);
     const int no_odom_probe_pwm_override = declare_parameter<int>(
@@ -1826,11 +1848,50 @@ class PingerHomingController : public rclcpp::Node {
         transition(mirrored ? "PROBE" : "REPROBE");
         return {};
       }
+      // A range-difference fit has no absolute-range observation.  With only
+      // the first excitation it can occasionally select a mathematically
+      // consistent near branch and declare arrival before any approach.  The
+      // successful Python sequence already has a mirrored probe; request that
+      // independent geometry only when an uncalibrated first fit claims the
+      // source is unusually near.  Far, well-observed fits retain the one-leg
+      // fast path.
+      const std::optional<double> candidate_distance =
+          position_ && source_smoothed_
+              ? std::optional<double>((*source_smoothed_ - *position_).norm())
+              : std::nullopt;
+      const bool near_first_fit_needs_confirmation =
+          legacy_python_sequence_ && success_range_m_ <= 0.0 &&
+          probe_attempt_ == 0 && candidate_distance &&
+          std::isfinite(*candidate_distance) &&
+          *candidate_distance <= first_lock_confirmation_radius_m_;
+      if (near_first_fit_needs_confirmation) {
+        RCLCPP_WARN(
+            get_logger(),
+            "uncalibrated first source fit is near (%.3fm <= %.3fm); "
+            "requiring mirrored confirmation before lock",
+            *candidate_distance, first_lock_confirmation_radius_m_);
+        ++probe_attempt_;
+        source_estimate_.reset();
+        source_smoothed_.reset();
+        transition("REPROBE");
+        return {};
+      }
       if (!source_locked_ && source_smoothed_) {
         source_locked_ = source_smoothed_;
+        const double fit_rms = source_estimate_
+            ? source_estimate_->rms_residual_m : std::numeric_limits<double>::quiet_NaN();
+        const double fit_condition = source_estimate_
+            ? source_estimate_->condition_number : std::numeric_limits<double>::quiet_NaN();
+        const double fit_initial_range = source_estimate_
+            ? source_estimate_->initial_range_m : std::numeric_limits<double>::quiet_NaN();
         RCLCPP_INFO(
-            get_logger(), "locked C++ pinger source at (%.3f, %.3f, %.3f)",
-            source_locked_->x(), source_locked_->y(), source_locked_->z());
+            get_logger(),
+            "locked C++ pinger source at (%.3f, %.3f, %.3f) "
+            "distance=%.3fm rms=%.6fm condition=%.3f initial_range=%.3fm samples=%zu",
+            source_locked_->x(), source_locked_->y(), source_locked_->z(),
+            candidate_distance.value_or(std::numeric_limits<double>::quiet_NaN()),
+            fit_rms, fit_condition, fit_initial_range,
+            source_estimate_ ? source_estimate_->sample_count : 0U);
       }
       probe_completed_ = true;
       transition("ALIGN");
@@ -2447,11 +2508,12 @@ class PingerHomingController : public rclcpp::Node {
         transition("ALIGN");
         forward = 0.0;
       } else {
-        transition("APPROACH");
-        if (distance > 6.0) forward = forward_max_;
-        else if (distance > 2.0) forward = std::min(forward_max_, forward_mid_);
-        else if (distance > 0.75) forward = std::min(forward_max_, forward_near_);
-        else {
+        if (distance > 0.75) {
+          transition("APPROACH");
+          if (distance > 6.0) forward = forward_max_;
+          else if (distance > 2.0) forward = std::min(forward_max_, forward_mid_);
+          else forward = std::min(forward_max_, forward_near_);
+        } else {
           transition("CONTACT");
           forward = std::min(forward_max_, forward_contact_);
           yaw = clamp(yaw, -0.25, 0.25);
@@ -2883,10 +2945,20 @@ class PingerHomingController : public rclcpp::Node {
     for (std::size_t index = 0; index < kPrimaryRcChannelCount; ++index) {
       msg.channels[index] = kRcNeutral;
     }
-    msg.channels[kChHeave] = static_cast<uint16_t>(axis_pwm(command.heave, rc_pwm_span_));
-    msg.channels[kChYaw] = static_cast<uint16_t>(axis_pwm(-command.yaw, rc_pwm_span_));
-    msg.channels[kChForward] = static_cast<uint16_t>(axis_pwm(command.forward, rc_pwm_span_));
-    msg.channels[kChSway] = static_cast<uint16_t>(axis_pwm(command.lateral, rc_pwm_span_));
+    const double xy_deadzone =
+        rc_deadzone_compensation_enabled_ ? rc_xy_deadzone_pwm_ : 0.0;
+    const double yaw_deadzone =
+        rc_deadzone_compensation_enabled_ ? rc_yaw_deadzone_pwm_ : 0.0;
+    const double heave_deadzone =
+        rc_deadzone_compensation_enabled_ ? rc_heave_deadzone_pwm_ : 0.0;
+    msg.channels[kChHeave] = static_cast<uint16_t>(
+        axis_pwm(command.heave, rc_pwm_span_, heave_deadzone));
+    msg.channels[kChYaw] = static_cast<uint16_t>(
+        axis_pwm(-command.yaw, rc_pwm_span_, yaw_deadzone));
+    msg.channels[kChForward] = static_cast<uint16_t>(
+        axis_pwm(command.forward, rc_pwm_span_, xy_deadzone));
+    msg.channels[kChSway] = static_cast<uint16_t>(
+        axis_pwm(command.lateral, rc_pwm_span_, xy_deadzone));
     rc_pub_->publish(msg);
   }
 
@@ -3077,6 +3149,11 @@ class PingerHomingController : public rclcpp::Node {
         << static_cast<int>(std::lround(probe_scale_ * rc_pwm_span_))
         << ",\"legacy_approach_pwm_delta\":"
         << static_cast<int>(std::lround(forward_max_ * rc_pwm_span_))
+        << ",\"rc_deadzone_compensation_enabled\":"
+        << bool_text(rc_deadzone_compensation_enabled_)
+        << ",\"rc_xy_deadzone_pwm\":" << rc_xy_deadzone_pwm_
+        << ",\"rc_yaw_deadzone_pwm\":" << rc_yaw_deadzone_pwm_
+        << ",\"rc_heave_deadzone_pwm\":" << rc_heave_deadzone_pwm_
         << ",\"legacy_probe_duration_scale\":" << probe_duration_scale_
         << ",\"probe_completed\":" << bool_text(probe_completed_)
         << ",\"require_source_lock\":" << bool_text(require_source_lock_)
@@ -3273,6 +3350,8 @@ class PingerHomingController : public rclcpp::Node {
         << bool_text(success_range_m_ <= 0.0)
         << ",\"arrival_radius_m\":" << arrival_radius_m_
         << ",\"arrival_hold_s\":" << arrival_hold_s_
+        << ",\"first_lock_confirmation_radius_m\":"
+        << first_lock_confirmation_radius_m_
         << ",\"amplitude_range_constant\":" << amplitude_range_constant_ << "}";
     msg.data = out.str();
     status_pub_->publish(msg);
@@ -3446,8 +3525,9 @@ class PingerHomingController : public rclcpp::Node {
   double acoustic_position_sway_limit_{0.60};
   double success_range_m_{0.0};
   double success_hold_s_{0.8};
-  double arrival_radius_m_{1.5};
+  double arrival_radius_m_{0.8};
   double arrival_hold_s_{1.0};
+  double first_lock_confirmation_radius_m_{3.0};
   double amplitude_range_constant_{0.325};
   bool source_xy_bounds_enabled_{false};
   double source_min_x_m_{-16.5};
@@ -3457,6 +3537,10 @@ class PingerHomingController : public rclcpp::Node {
   double max_source_z_world_{-0.5};
   double pinger_min_submergence_m_{0.20};
   double rc_pwm_span_{400.0};
+  bool rc_deadzone_compensation_enabled_{true};
+  double rc_xy_deadzone_pwm_{30.0};
+  double rc_yaw_deadzone_pwm_{40.0};
+  double rc_heave_deadzone_pwm_{30.0};
 
   std::optional<Eigen::Vector3d> position_;
   std::optional<Eigen::Quaterniond> imu_orientation_;

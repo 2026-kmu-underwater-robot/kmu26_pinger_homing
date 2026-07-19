@@ -116,7 +116,7 @@ ros2 launch kmu26_pinger_homing pinger_homing_real_interactive.launch.py \
   approach_pwm_delta:=25
 ```
 
-종료는 실행 터미널에서 `Ctrl-C`다. mux가 neutral을 publish하고, MuJoCo Web GUI가
+종료는 실행 터미널에서 `Ctrl-C`다. 제어기가 RC override를 release하고, MuJoCo Web GUI가
 있는 환경에서는 GUI의 수동 RC publisher도 자동 복구한다.
 
 ### 실물 기본 파라미터
@@ -141,8 +141,12 @@ ros2 launch kmu26_pinger_homing pinger_homing_real_interactive.launch.py \
 |  | `auto_arm` / `auto_mode` | `false` / `false` | 실물에서 임의 arm·모드변경 방지 |
 |  | `tank_max_depth_m` | `11.0 m` | 반드시 현재 수조 깊이로 override |
 | RC | `rc_pwm_span` | `400` | 정규화 명령 1.0에 대응하는 neutral 기준 PWM 폭 |
-|  | `probe_pwm_delta` | `±20` | 1500 기준 ABBA 전·후·좌·우 probe PWM |
-|  | `approach_pwm_delta` | `+25` | 추정 방향 정렬 후 전진 PWM |
+|  | `rc_deadzone_compensation_enabled` | `true` | 실물 Pixhawk `RCx_DZ`를 non-neutral 명령에 자동 가산 |
+|  | `rc_xy_deadzone_pwm` / `rc_yaw_deadzone_pwm` / `rc_heave_deadzone_pwm` | `30` / `40` / `30` | 팀 실물 ArduSub 파라미터 계약 |
+|  | `probe_pwm_delta` | `±20` | deadzone 바깥에서 사용할 ABBA 유효 PWM; XY raw 출력은 기본 `1500±50` |
+|  | `approach_pwm_delta` | `+25` | deadzone 바깥의 유효 전진 PWM; raw 출력은 기본 `1555` |
+| 종료 | `arrival_radius_m` | `0.8 m` | 절대 거리 보정이 없을 때 source-fit 도착 반경; Phase fit 편향을 고려해 실제 1.5 m 이내에 들기 위한 보수적 기본값 |
+|  | `first_lock_confirmation_radius_m` | `3.0 m` | 첫 uncalibrated fit이 이보다 가까우면 즉시 완료하지 않고 mirrored probe로 재확인 |
 | odom 레거시 probe | `legacy_probe_duration_scale` | `1.0` | 성공한 Python 전·후·좌·우·수직 중립분리 궤적의 시간 배율 |
 | no-odom fallback | `probe_leg_s` / `probe_neutral_s` | `1.50 s` / `0.50 s` | `navigation_mode:=no_odom_phase`에서만 사용하는 각 자극 leg/중립 간격 |
 |  | `probe_settle_s` / `probe_sample_delay_s` | `0.80 s` / `0.45 s` | no-odom 시작 안정화와 spool-up 제외 시간 |
@@ -176,18 +180,20 @@ ros2 topic echo /pinger_homing/status
 
 - 첫 실물 odometry 운용은 `probe_pwm_delta:=20`, `approach_pwm_delta:=25`를 유지한다.
   `/odometry/filtered`에서 실제 변위와 `sample_count` 증가를 확인한 뒤에만 PWM을 조금씩 올린다.
+  이 값은 1500에서의 raw 차이가 아니라 Pixhawk deadzone 바깥의 유효 차이다.
 - 아래 `motion_response`/`innovation` 튜닝은 `navigation_mode:=no_odom_phase` 전용이다.
   전진 중 실제로 멀어지는데 재추정이 늦으면 `innovation_limit`을 낮추거나
   `innovation_hold_s`를 줄인다. 잡음으로 너무 자주 재추정하면 반대로 올린다.
 - `reestimate_policy:=fixed approach_duration_s:=...`는 과거 고정 주기 비교용이며,
   실물 기본 운용에서는 사용하지 않는다.
 
-### MuJoCo와 실물 값은 다르다
+### MuJoCo와 실물 계약
 
-MuJoCo에서 실물 launch를 시험할 때는 반드시 `use_sim_time:=true`,
-`audio_input_latency_s:=0.25`, `probe_pwm_delta:=90`,
-`approach_pwm_delta:=120`을 별도로 준다. 이 값들은 물리 시뮬레이터용이며
-실물 NUC에 복사하면 안 된다. 실물 기본값은 위 표의 `20/25`, `use_sim_time:=false`다.
+MuJoCo도 실물과 같은 `probe_pwm_delta:=20`, `approach_pwm_delta:=25`, RC deadzone,
+`use_sim_time:=false`, `audio_input_latency_s:=0.0`을 사용한다. 외부 Phase estimator가
+unstamped PCM과 odometry를 모두 수신 시각으로 결합하므로, 시뮬도 동일한 wall-time
+계약을 따른다. 시뮬에서만 큰 PWM이나 별도 latency를 주어 성공시키는 튜닝은 허용하지
+않는다.
 
 ## test-tank Phase/SNR 핑거 호밍
 
