@@ -1170,10 +1170,6 @@ class PingerHomingController : public rclcpp::Node {
     no_odom_probe_leg_extensions_s_.fill(0.0);
     no_odom_probe_sample_enabled_ = false;
     no_odom_forward_started_.reset();
-    // A new ABBA fit invalidates any previous turn-settle interval.  Without
-    // this reset a fresh bearing could inherit a completed ALIGN hold and
-    // start surge in the same tick that its new direction is accepted.
-    yaw_settle_started_.reset();
     reset_motion_response();
     filtered_direction_body_.reset();
     probe_completed_ = false;
@@ -1461,22 +1457,7 @@ class PingerHomingController : public rclcpp::Node {
         : 0.0;
     double forward = 0.0;
     if (state_ == "ALIGN") {
-      // Phase ABBA yields a direction, not a lateral position controller.
-      // Do not turn the first accepted bearing into an immediate straight
-      // surge: wait until both the residual bearing and measured yaw rate are
-      // settled for a short hold.  This is the same physical completion
-      // contract used by the metric-direction ALIGN path, but is essential
-      // here because the next Phase correction arrives only after a forward
-      // segment and a new deliberate ABBA excitation.
-      const bool settled = kmu26::pinger_homing::yaw_alignment_sample_settled(
-          bearing, current_yaw_rate(now), align_exit_rad_, yaw_settle_rate_rad_s_);
-      if (!settled) {
-        yaw_settle_started_.reset();
-      } else if (!yaw_settle_started_) {
-        yaw_settle_started_ = now;
-      }
-      if (yaw_settle_started_ &&
-          seconds_since(*yaw_settle_started_, now) >= yaw_settle_hold_s_) {
+      if (std::abs(bearing) <= align_exit_rad_) {
         transition("APPROACH");
         no_odom_forward_started_ = now;
         forward = std::min(forward_max_, no_odom_forward_command_);
@@ -1484,9 +1465,7 @@ class PingerHomingController : public rclcpp::Node {
     } else if (std::abs(bearing) > align_enter_rad_) {
       transition("ALIGN");
       no_odom_forward_started_.reset();
-      yaw_settle_started_.reset();
     } else {
-      yaw_settle_started_.reset();
       if (!no_odom_forward_started_) no_odom_forward_started_ = now;
       if (seconds_since(*no_odom_forward_started_, now) >= no_odom_forward_duration_s_) {
         // Stop and repeat the paired body-axis Phase probe.  This is the

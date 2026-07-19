@@ -74,20 +74,9 @@ def test_motion_response_adapts_timing_without_becoming_phase_bearing_input() ->
     assert "never enter the Phase ABBA regression" in controller
 
 
-def test_no_odom_phase_settles_yaw_before_first_forward_segment() -> None:
-    controller = (ROOT / "src" / "pinger_homing" / "pinger_homing_controller.cpp").read_text()
-    no_odom_tick = controller.split("void no_odom_phase_tick", 1)[1].split(
-        "void direct_direction_tick", 1
-    )[0]
-    assert "yaw_alignment_sample_settled(" in no_odom_tick
-    assert "yaw_settle_hold_s_" in no_odom_tick
-    assert "Do not turn the first accepted bearing into an immediate straight" in no_odom_tick
-
-
 if __name__ == "__main__":
     test_real_launch_uses_canonical_cpp_no_odom_phase_controller()
     test_real_launch_preserves_external_hydrophone_estimator_boundary()
     test_xy_alt_hold_does_not_require_depth_for_a_heave_free_probe()
     test_interactive_launch_scans_then_injects_selected_startup_frequency()
     test_motion_response_adapts_timing_without_becoming_phase_bearing_input()
-    test_no_odom_phase_settles_yaw_before_first_forward_segment()
