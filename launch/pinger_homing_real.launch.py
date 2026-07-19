@@ -165,6 +165,20 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("probe_neutral_s", default_value="0.50"),
         DeclareLaunchArgument("probe_settle_s", default_value="0.80"),
         DeclareLaunchArgument("probe_sample_delay_s", default_value="0.45"),
+        # Adaptive is the deployed default: a new ABBA observation happens
+        # only when Phase innovation or vehicle-response feedback says the
+        # locked bearing is no longer credible.  The max is a stale-bearing
+        # watchdog, not a four-second periodic refresh.
+        DeclareLaunchArgument("reestimate_policy", default_value="adaptive"),
+        DeclareLaunchArgument("approach_min_s", default_value="2.5"),
+        DeclareLaunchArgument("approach_max_s", default_value="25.0"),
+        DeclareLaunchArgument("innovation_enabled", default_value="true"),
+        DeclareLaunchArgument("innovation_window_s", default_value="0.70"),
+        DeclareLaunchArgument("innovation_noise_floor_m", default_value="0.0005"),
+        DeclareLaunchArgument("innovation_limit", default_value="1.50"),
+        DeclareLaunchArgument("innovation_hold_s", default_value="1.20"),
+        DeclareLaunchArgument("innovation_min_expected_delta_m", default_value="0.0002"),
+        # Compatibility-only. Used only with reestimate_policy:=fixed.
         DeclareLaunchArgument("approach_duration_s", default_value="4.0"),
         DeclareLaunchArgument("initial_confirmation_probes", default_value="2"),
     ]
@@ -308,6 +322,31 @@ def generate_launch_description() -> LaunchDescription:
             ),
             "no_odom_forward_duration_s": ParameterValue(
                 LaunchConfiguration("approach_duration_s"), value_type=float
+            ),
+            "no_odom_reestimate_policy": LaunchConfiguration("reestimate_policy"),
+            "no_odom_approach_min_s": ParameterValue(
+                LaunchConfiguration("approach_min_s"), value_type=float
+            ),
+            "no_odom_approach_max_s": ParameterValue(
+                LaunchConfiguration("approach_max_s"), value_type=float
+            ),
+            "no_odom_innovation_enabled": ParameterValue(
+                LaunchConfiguration("innovation_enabled"), value_type=bool
+            ),
+            "no_odom_innovation_window_s": ParameterValue(
+                LaunchConfiguration("innovation_window_s"), value_type=float
+            ),
+            "no_odom_innovation_noise_floor_m": ParameterValue(
+                LaunchConfiguration("innovation_noise_floor_m"), value_type=float
+            ),
+            "no_odom_innovation_limit": ParameterValue(
+                LaunchConfiguration("innovation_limit"), value_type=float
+            ),
+            "no_odom_innovation_hold_s": ParameterValue(
+                LaunchConfiguration("innovation_hold_s"), value_type=float
+            ),
+            "no_odom_innovation_min_expected_delta_m": ParameterValue(
+                LaunchConfiguration("innovation_min_expected_delta_m"), value_type=float
             ),
             "no_odom_initial_confirmation_probes": ParameterValue(
                 LaunchConfiguration("initial_confirmation_probes"), value_type=int

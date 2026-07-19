@@ -69,6 +69,20 @@ def test_motion_response_adapts_timing_without_becoming_phase_bearing_input() ->
     controller = (ROOT / "src" / "pinger_homing" / "pinger_homing_controller.cpp").read_text()
     assert "handle_no_odom_motion_response" in controller
     assert "motion_response_velocity_topic" in controller
+
+
+def test_adaptive_phase_reestimate_uses_innovation_not_fixed_cadence() -> None:
+    root = Path(__file__).resolve().parents[1]
+    controller = (root / "src" / "pinger_homing" / "pinger_homing_controller.cpp").read_text()
+    real_launch = (root / "launch" / "pinger_homing_real.launch.py").read_text()
+    tank_launch = (root / "launch" / "pinger_homing_test_tank.launch.py").read_text()
+    assert '"no_odom_reestimate_policy", "adaptive"' in controller
+    assert "handle_no_odom_phase_innovation" in controller
+    assert "handle_no_odom_approach_watchdog" in controller
+    assert "no_odom_innovation_limit" in controller
+    assert 'DeclareLaunchArgument("reestimate_policy", default_value="adaptive")' in real_launch
+    assert 'DeclareLaunchArgument("approach_max_s", default_value="25.0")' in real_launch
+    assert 'DeclareLaunchArgument("reestimate_policy", default_value="adaptive")' in tank_launch
     assert "no_odom_probe_leg_extensions_s_" in controller
     assert "uses_for_bearing\\\":false" in controller
     assert "never enter the Phase ABBA regression" in controller
@@ -80,3 +94,4 @@ if __name__ == "__main__":
     test_xy_alt_hold_does_not_require_depth_for_a_heave_free_probe()
     test_interactive_launch_scans_then_injects_selected_startup_frequency()
     test_motion_response_adapts_timing_without_becoming_phase_bearing_input()
+    test_adaptive_phase_reestimate_uses_innovation_not_fixed_cadence()

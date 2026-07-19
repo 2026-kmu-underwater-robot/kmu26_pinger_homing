@@ -37,15 +37,23 @@ reports `feedback_fresh=false` in `/pinger_homing/status` and retains the
 validated fixed timing. It is a timing/adaptation input, never a
 Phase-bearing input.
 
-For the test tank, the validated default keeps an initially confirmed full
-ABBA bearing for a `10 s` tracking window. During that window IMU yaw is
-closed every controller tick and motion response is monitored continuously.
-At the end of the window the controller executes another full ABBA fit and
-replaces the bearing. A single scalar Phase/range-rate stream cannot correct
-left-versus-right error continuously during straight travel; deliberately
-exciting XY at each refresh is the observable feedback step. Keep
-`initial_confirmation_probes:=2` for the first bearing and tune this cadence
-with `approach_duration_s`.
+For the test tank, the default is `reestimate_policy:=adaptive`, not a fixed
+four- or ten-second ABBA cycle. IMU yaw is closed every controller tick and
+the controller compares the median Phase delta observed during a forward
+segment against the Phase delta predicted by the most recent ABBA fit. A
+persistently positive normalized innovation (the range is closing less than
+predicted, or is opening) triggers neutral followed by a fresh ABBA estimate.
+Low measured XY speed does the same through `motion_response`. `approach_max_s`
+is only a stale-bearing watchdog; it is not the normal update frequency.
+
+A single scalar Phase/range-rate stream cannot identify left-versus-right
+error during perfectly straight travel. The adaptive gate therefore does not
+invent a fake lateral error: it requests a short, observable two-axis ABBA
+excitation when the innovation is bad. Tune the gate with
+`innovation_window_s`, `innovation_limit`, `innovation_hold_s`, and retain
+`initial_confirmation_probes:=2` for a conservative first bearing. Use
+`reestimate_policy:=fixed approach_duration_s:=...` only to reproduce the
+legacy periodic behavior.
 
 ## Topic boundary
 

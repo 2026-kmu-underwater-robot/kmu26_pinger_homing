@@ -51,12 +51,22 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("probe_neutral_s", default_value="0.35"),
         DeclareLaunchArgument("probe_settle_s", default_value="0.55"),
         DeclareLaunchArgument("probe_sample_delay_s", default_value="0.40"),
-        # One complete ABBA estimate is retained for a ten-second tracking
-        # window.  During that window IMU yaw closes the heading loop every
-        # control tick and motion_response checks real XY progress. A fresh
-        # full ABBA fit then replaces the bearing; a scalar Phase stream alone
-        # cannot determine left/right correction continuously without such
-        # deliberate XY excitation.
+        # New ABBA estimates are condition driven: a persistent Phase
+        # innovation (actual range change contradicts the locked bearing) or
+        # low measured XY response triggers one. ``approach_max_s`` is only a
+        # stale-bearing watchdog.  A scalar Phase stream cannot derive a new
+        # left/right bearing while driving straight, so a triggered ABBA is
+        # the deliberate observable feedback step.
+        DeclareLaunchArgument("reestimate_policy", default_value="adaptive"),
+        DeclareLaunchArgument("approach_min_s", default_value="2.5"),
+        DeclareLaunchArgument("approach_max_s", default_value="25.0"),
+        DeclareLaunchArgument("innovation_enabled", default_value="true"),
+        DeclareLaunchArgument("innovation_window_s", default_value="0.70"),
+        DeclareLaunchArgument("innovation_noise_floor_m", default_value="0.0005"),
+        DeclareLaunchArgument("innovation_limit", default_value="1.50"),
+        DeclareLaunchArgument("innovation_hold_s", default_value="1.20"),
+        DeclareLaunchArgument("innovation_min_expected_delta_m", default_value="0.0002"),
+        # Compatibility-only, used only with reestimate_policy:=fixed.
         DeclareLaunchArgument("approach_duration_s", default_value="10.0"),
         DeclareLaunchArgument("initial_confirmation_probes", default_value="2"),
         Node(
@@ -149,6 +159,23 @@ def generate_launch_description() -> LaunchDescription:
                     LaunchConfiguration("probe_sample_delay_s"), value_type=float),
                 "no_odom_forward_duration_s": ParameterValue(
                     LaunchConfiguration("approach_duration_s"), value_type=float),
+                "no_odom_reestimate_policy": LaunchConfiguration("reestimate_policy"),
+                "no_odom_approach_min_s": ParameterValue(
+                    LaunchConfiguration("approach_min_s"), value_type=float),
+                "no_odom_approach_max_s": ParameterValue(
+                    LaunchConfiguration("approach_max_s"), value_type=float),
+                "no_odom_innovation_enabled": ParameterValue(
+                    LaunchConfiguration("innovation_enabled"), value_type=bool),
+                "no_odom_innovation_window_s": ParameterValue(
+                    LaunchConfiguration("innovation_window_s"), value_type=float),
+                "no_odom_innovation_noise_floor_m": ParameterValue(
+                    LaunchConfiguration("innovation_noise_floor_m"), value_type=float),
+                "no_odom_innovation_limit": ParameterValue(
+                    LaunchConfiguration("innovation_limit"), value_type=float),
+                "no_odom_innovation_hold_s": ParameterValue(
+                    LaunchConfiguration("innovation_hold_s"), value_type=float),
+                "no_odom_innovation_min_expected_delta_m": ParameterValue(
+                    LaunchConfiguration("innovation_min_expected_delta_m"), value_type=float),
                 "no_odom_initial_confirmation_probes": ParameterValue(
                     LaunchConfiguration("initial_confirmation_probes"), value_type=int),
                 "no_odom_terminal_brake_enabled": True,

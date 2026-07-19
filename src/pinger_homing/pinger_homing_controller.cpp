@@ -65,6 +65,16 @@ struct NoOdomPhaseSample {
   double delta_range_m{0.0};
 };
 
+// A Phase delta is a displacement increment between adjacent demodulation
+// windows.  During a straight approach it is the only new acoustic
+// observation available without deliberately exciting another body axis.
+// Keep its timestamp with the value so an innovation window is based on time,
+// rather than an assumed audio publication rate.
+struct NoOdomApproachSample {
+  SteadyTime stamp{};
+  double delta_range_m{0.0};
+};
+
 double seconds_since(const SteadyTime &stamp, const SteadyTime &now) {
   if (stamp == SteadyTime{}) return 1.0e9;
   // transition() records a fresh steady-clock timestamp a few microseconds
@@ -299,8 +309,37 @@ class PingerHomingController : public rclcpp::Node {
         1.0e-6, declare_parameter<double>("no_odom_min_horizontal_signal", 1.0e-4));
     no_odom_forward_command_ = clamp(
         declare_parameter<double>("no_odom_forward_command", 0.30), 0.05, 0.50);
+    no_odom_reestimate_policy_ = declare_parameter<std::string>(
+        "no_odom_reestimate_policy", "adaptive");
+    if (no_odom_reestimate_policy_ != "adaptive" &&
+        no_odom_reestimate_policy_ != "fixed") {
+      throw std::invalid_argument(
+          "no_odom_reestimate_policy must be 'adaptive' or 'fixed'");
+    }
+    // ``forward_duration`` is retained only for an explicit legacy fixed
+    // cadence.  Adaptive Phase runs re-probe from an acoustic innovation or
+    // vehicle-response event; this watchdog prevents an indefinitely stale
+    // bearing if neither feedback stream is usable.
     no_odom_forward_duration_s_ = clamp(
         declare_parameter<double>("no_odom_forward_duration_s", 4.0), 0.5, 40.0);
+    no_odom_approach_min_s_ = clamp(
+        declare_parameter<double>("no_odom_approach_min_s", 2.5), 0.0, 30.0);
+    no_odom_approach_max_s_ = clamp(
+        declare_parameter<double>("no_odom_approach_max_s", 25.0), 0.0, 120.0);
+    no_odom_innovation_enabled_ = declare_parameter<bool>(
+        "no_odom_innovation_enabled", true);
+    no_odom_innovation_window_s_ = clamp(
+        declare_parameter<double>("no_odom_innovation_window_s", 0.70), 0.10, 5.0);
+    no_odom_innovation_noise_floor_m_ = clamp(
+        declare_parameter<double>("no_odom_innovation_noise_floor_m", 0.0005),
+        1.0e-6, 0.02);
+    no_odom_innovation_limit_ = clamp(
+        declare_parameter<double>("no_odom_innovation_limit", 1.50), 0.25, 10.0);
+    no_odom_innovation_hold_s_ = clamp(
+        declare_parameter<double>("no_odom_innovation_hold_s", 1.20), 0.10, 10.0);
+    no_odom_innovation_min_expected_delta_m_ = clamp(
+        declare_parameter<double>("no_odom_innovation_min_expected_delta_m", 0.0002),
+        1.0e-6, 0.02);
     no_odom_terminal_brake_enabled_ = declare_parameter<bool>(
         "no_odom_terminal_brake_enabled", true);
     no_odom_terminal_brake_command_ = clamp(
@@ -820,6 +859,7 @@ class PingerHomingController : public rclcpp::Node {
     }
     raw_delta_history_.push_back(bounded_delta);
     while (raw_delta_history_.size() > 3U) raw_delta_history_.pop_front();
+    record_no_odom_approach_delta(now, bounded_delta);
     const std::vector<double> values(raw_delta_history_.begin(), raw_delta_history_.end());
     cumulative_range_change_m_ += kmu26::pinger_homing::median(values);
     // A fresh Phase/direction stream is sufficient for the no-XY fallback.
@@ -1020,6 +1060,102 @@ class PingerHomingController : public rclcpp::Node {
     motion_response_low_speed_started_.reset();
   }
 
+  void reset_no_odom_approach_innovation() {
+    no_odom_approach_samples_.clear();
+    no_odom_innovation_bad_started_.reset();
+    no_odom_innovation_ratio_.reset();
+    no_odom_observed_delta_m_.reset();
+  }
+
+  void record_no_odom_approach_delta(const SteadyTime &now, double delta_range_m) {
+    if (navigation_mode_ != "no_odom_phase" || state_ != "APPROACH" ||
+        !no_odom_forward_started_) {
+      return;
+    }
+    no_odom_approach_samples_.push_back({now, delta_range_m});
+    while (!no_odom_approach_samples_.empty() &&
+           seconds_since(no_odom_approach_samples_.front().stamp, now) >
+               no_odom_innovation_window_s_) {
+      no_odom_approach_samples_.pop_front();
+    }
+  }
+
+  bool handle_no_odom_phase_innovation(const SteadyTime &now) {
+    if (no_odom_reestimate_policy_ != "adaptive" ||
+        !no_odom_innovation_enabled_ || !no_odom_forward_started_) {
+      return false;
+    }
+    const double elapsed_s = seconds_since(*no_odom_forward_started_, now);
+    if (elapsed_s < no_odom_approach_min_s_ ||
+        no_odom_approach_samples_.size() < 3U ||
+        !std::isfinite(no_odom_forward_expected_delta_m_) ||
+        no_odom_forward_expected_delta_m_ >=
+            -no_odom_innovation_min_expected_delta_m_) {
+      no_odom_innovation_bad_started_.reset();
+      return false;
+    }
+
+    std::vector<double> observed;
+    observed.reserve(no_odom_approach_samples_.size());
+    for (const auto &sample : no_odom_approach_samples_) {
+      observed.push_back(sample.delta_range_m);
+    }
+    const double observed_median = kmu26::pinger_homing::median(observed);
+    const double innovation_m = observed_median - no_odom_forward_expected_delta_m_;
+    const double sigma_m = std::max(
+        no_odom_innovation_noise_floor_m_, no_odom_probe_fit_rms_m_);
+    const double innovation_ratio = innovation_m / sigma_m;
+    no_odom_observed_delta_m_ = observed_median;
+    no_odom_innovation_ratio_ = innovation_ratio;
+
+    // A positive innovation means that the actual range closes less than the
+    // ABBA bearing predicted (or is opening).  This is the Phase equivalent
+    // of a normalized innovation/error gate: do not pretend it is a lateral
+    // position error, because a single straight-line scalar observation
+    // cannot distinguish left from right.  Instead neutral and collect a new
+    // two-axis observable ABBA sample only after the mismatch persists.
+    if (innovation_ratio <= no_odom_innovation_limit_) {
+      no_odom_innovation_bad_started_.reset();
+      return false;
+    }
+    if (!no_odom_innovation_bad_started_) {
+      no_odom_innovation_bad_started_ = now;
+      return false;
+    }
+    if (seconds_since(*no_odom_innovation_bad_started_, now) <
+        no_odom_innovation_hold_s_) {
+      return false;
+    }
+
+    ++no_odom_innovation_reestimate_count_;
+    RCLCPP_WARN(
+        get_logger(),
+        "Phase innovation %.2f exceeds %.2f for %.2fs: observed delta=%+.6g "
+        "expected=%+.6g m; neutral then adaptive ABBA re-estimate #%d",
+        innovation_ratio, no_odom_innovation_limit_,
+        seconds_since(*no_odom_innovation_bad_started_, now), observed_median,
+        no_odom_forward_expected_delta_m_, no_odom_innovation_reestimate_count_);
+    publish_command(Command{});
+    start_no_odom_probe(now);
+    return true;
+  }
+
+  bool handle_no_odom_approach_watchdog(const SteadyTime &now) {
+    if (no_odom_reestimate_policy_ != "adaptive" ||
+        no_odom_approach_max_s_ <= 0.0 || !no_odom_forward_started_ ||
+        seconds_since(*no_odom_forward_started_, now) < no_odom_approach_max_s_) {
+      return false;
+    }
+    ++no_odom_watchdog_reestimate_count_;
+    RCLCPP_WARN(
+        get_logger(),
+        "adaptive Phase approach watchdog %.1fs reached; neutral then ABBA re-estimate #%d",
+        no_odom_approach_max_s_, no_odom_watchdog_reestimate_count_);
+    publish_command(Command{});
+    start_no_odom_probe(now);
+    return true;
+  }
+
   bool handle_no_odom_motion_response(
       const SteadyTime &now, const Command &requested) {
     const double requested_xy = std::hypot(requested.forward, requested.lateral);
@@ -1170,6 +1306,8 @@ class PingerHomingController : public rclcpp::Node {
     no_odom_probe_leg_extensions_s_.fill(0.0);
     no_odom_probe_sample_enabled_ = false;
     no_odom_forward_started_.reset();
+    no_odom_forward_expected_delta_m_ = std::numeric_limits<double>::quiet_NaN();
+    reset_no_odom_approach_innovation();
     reset_motion_response();
     filtered_direction_body_.reset();
     probe_completed_ = false;
@@ -1307,6 +1445,12 @@ class PingerHomingController : public rclcpp::Node {
     const auto quaternion = attitude_quaternion(now);
     if (!quaternion) return false;
     const Eigen::Vector3d body_direction = score.normalized();
+    // After yaw has aligned this world bearing to the vehicle's X axis, the
+    // expected per-window phase displacement for a forward command is the
+    // horizontal ABBA score magnitude times that command.  Moving toward the
+    // source is negative delta-range by this package's convention.
+    no_odom_forward_expected_delta_m_ =
+        -score.head<2>().norm() * no_odom_forward_command_;
     no_odom_direction_world_ =
         (quaternion->toRotationMatrix() * body_direction).normalized();
     last_control_direction_source_ = "no_odom_phase_probe";
@@ -1460,6 +1604,7 @@ class PingerHomingController : public rclcpp::Node {
       if (std::abs(bearing) <= align_exit_rad_) {
         transition("APPROACH");
         no_odom_forward_started_ = now;
+        reset_no_odom_approach_innovation();
         forward = std::min(forward_max_, no_odom_forward_command_);
       }
     } else if (std::abs(bearing) > align_enter_rad_) {
@@ -1467,10 +1612,10 @@ class PingerHomingController : public rclcpp::Node {
       no_odom_forward_started_.reset();
     } else {
       if (!no_odom_forward_started_) no_odom_forward_started_ = now;
-      if (seconds_since(*no_odom_forward_started_, now) >= no_odom_forward_duration_s_) {
-        // Stop and repeat the paired body-axis Phase probe.  This is the
-        // periodic re-estimation point; no stale bearing is followed beyond
-        // the configured forward interval.
+      if (no_odom_reestimate_policy_ == "fixed" &&
+          seconds_since(*no_odom_forward_started_, now) >= no_odom_forward_duration_s_) {
+        // Compatibility mode for a deliberately fixed cadence.  The normal
+        // profile uses the innovation/response gates below instead.
         start_no_odom_probe(now);
         publish_command(Command{});
         return;
@@ -1480,6 +1625,8 @@ class PingerHomingController : public rclcpp::Node {
     }
     const Command approach_command{forward, 0.0, heave, yaw};
     if (handle_no_odom_motion_response(now, approach_command)) return;
+    if (handle_no_odom_phase_innovation(now)) return;
+    if (handle_no_odom_approach_watchdog(now)) return;
     publish_command(approach_command);
   }
 
@@ -2946,7 +3093,24 @@ class PingerHomingController : public rclcpp::Node {
         << ",\"fit_inlier_ratio\":" << no_odom_probe_fit_inlier_ratio_
         << ",\"probe_pwm_delta\":" << no_odom_probe_pwm_delta_
         << ",\"approach_pwm_delta\":" << no_odom_approach_pwm_delta_
-        << ",\"forward_duration_s\":" << no_odom_forward_duration_s_
+        << ",\"reestimate_policy\":\"" << no_odom_reestimate_policy_ << "\""
+        << ",\"legacy_fixed_duration_s\":" << no_odom_forward_duration_s_
+        << ",\"approach_min_s\":" << no_odom_approach_min_s_
+        << ",\"approach_max_s\":" << no_odom_approach_max_s_
+        << ",\"approach_elapsed_s\":" << json_number(
+            no_odom_forward_started_
+                ? std::optional<double>(seconds_since(*no_odom_forward_started_, now))
+                : std::nullopt)
+        << ",\"expected_delta_m\":" << json_number(
+            std::isfinite(no_odom_forward_expected_delta_m_)
+                ? std::optional<double>(no_odom_forward_expected_delta_m_)
+                : std::nullopt, 7)
+        << ",\"observed_delta_m\":" << json_number(no_odom_observed_delta_m_, 7)
+        << ",\"innovation_ratio\":" << json_number(no_odom_innovation_ratio_, 4)
+        << ",\"innovation_limit\":" << no_odom_innovation_limit_
+        << ",\"innovation_hold_s\":" << no_odom_innovation_hold_s_
+        << ",\"innovation_reestimate_count\":" << no_odom_innovation_reestimate_count_
+        << ",\"watchdog_reestimate_count\":" << no_odom_watchdog_reestimate_count_
         << ",\"terminal_brake_enabled\":"
         << bool_text(no_odom_terminal_brake_enabled_)
         << ",\"terminal_brake_active\":"
@@ -3108,7 +3272,16 @@ class PingerHomingController : public rclcpp::Node {
   int no_odom_min_samples_per_leg_{3};
   double no_odom_min_horizontal_signal_{1.0e-4};
   double no_odom_forward_command_{0.30};
+  std::string no_odom_reestimate_policy_{"adaptive"};
   double no_odom_forward_duration_s_{4.0};
+  double no_odom_approach_min_s_{2.5};
+  double no_odom_approach_max_s_{25.0};
+  bool no_odom_innovation_enabled_{true};
+  double no_odom_innovation_window_s_{0.70};
+  double no_odom_innovation_noise_floor_m_{0.0005};
+  double no_odom_innovation_limit_{1.50};
+  double no_odom_innovation_hold_s_{1.20};
+  double no_odom_innovation_min_expected_delta_m_{0.0002};
   bool no_odom_terminal_brake_enabled_{true};
   double no_odom_terminal_brake_command_{0.22};
   double no_odom_terminal_brake_duration_s_{0.90};
@@ -3259,6 +3432,13 @@ class PingerHomingController : public rclcpp::Node {
       std::numeric_limits<double>::quiet_NaN()};
   bool no_odom_initial_bearing_confirmed_{false};
   std::optional<SteadyTime> no_odom_forward_started_;
+  double no_odom_forward_expected_delta_m_{std::numeric_limits<double>::quiet_NaN()};
+  std::deque<NoOdomApproachSample> no_odom_approach_samples_;
+  std::optional<SteadyTime> no_odom_innovation_bad_started_;
+  std::optional<double> no_odom_innovation_ratio_;
+  std::optional<double> no_odom_observed_delta_m_;
+  int no_odom_innovation_reestimate_count_{0};
+  int no_odom_watchdog_reestimate_count_{0};
   std::optional<double> motion_response_horizontal_speed_mps_;
   std::optional<SteadyTime> motion_response_command_started_;
   std::optional<SteadyTime> motion_response_low_speed_started_;
