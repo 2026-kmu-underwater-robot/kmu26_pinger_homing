@@ -29,6 +29,7 @@ def test_frequency_selection_contract():
     assert "min_snr_db_" in selector
     assert "min_peak_prominence_db_" in selector
     assert "minimum_candidate_hits_" in selector
+    assert "relative_to_top_snr_db_" in selector
     assert "average_power_" in selector
     assert "spectral_peaks" in selector
     assert '"/pinger_homing/manual_selection"' in selector

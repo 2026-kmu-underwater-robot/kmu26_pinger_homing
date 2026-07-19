@@ -71,6 +71,8 @@ class FingerFrequencySelector final : public rclcpp::Node {
         declare_parameter<double>("candidate_cluster_hz", 25.0), 1.0, 500.0);
     candidate_separation_hz_ = std::clamp(
         declare_parameter<double>("candidate_separation_hz", 75.0), 1.0, 2000.0);
+    relative_to_top_snr_db_ = std::clamp(
+        declare_parameter<double>("relative_to_top_snr_db", 18.0), 0.0, 80.0);
     max_candidates_ = std::clamp(
         static_cast<int>(declare_parameter<int>("max_candidates", 5)), 1, 10);
     blacklist_frequency_hz_ = declare_parameter<double>("blacklist_frequency_hz", 0.0);
@@ -308,6 +310,17 @@ class FingerFrequencySelector final : public rclcpp::Node {
       if (a.hits != b.hits) return a.hits > b.hits;
       return a.score > b.score;
     });
+    // A persistent simulator/vehicle tone can meet an absolute SNR floor
+    // even though it is far below the selected pinger. Keep genuinely close
+    // competing transmitters but hide such residual peaks from the operator.
+    if (require_quality && relative_to_top_snr_db_ > 0.0 && !values.empty()) {
+      const double minimum_relative_score = values.front().score - relative_to_top_snr_db_;
+      values.erase(
+          std::remove_if(values.begin(), values.end(), [minimum_relative_score](const Candidate &candidate) {
+            return candidate.score < minimum_relative_score;
+          }),
+          values.end());
+    }
     if (values.size() > static_cast<std::size_t>(max_candidates_)) {
       values.resize(static_cast<std::size_t>(max_candidates_));
     }
@@ -345,8 +358,8 @@ class FingerFrequencySelector final : public rclcpp::Node {
     candidate_pub_->publish(std_msgs::msg::String().set__data(json.str()));
 
     RCLCPP_INFO(
-        get_logger(), "FFT candidates after %zu windows (%.3f Hz/bin):",
-        fft_windows_, frequency_resolution_hz());
+        get_logger(), "FFT candidates after %zu windows (%.3f Hz/bin, within %.1f dB of strongest):",
+        fft_windows_, frequency_resolution_hz(), relative_to_top_snr_db_);
     for (std::size_t index = 0; index < final_candidates_.size(); ++index) {
       const auto &candidate = final_candidates_[index];
       RCLCPP_INFO(
@@ -411,6 +424,7 @@ class FingerFrequencySelector final : public rclcpp::Node {
   double min_snr_db_{9.0}, min_peak_prominence_db_{4.5};
   int minimum_candidate_hits_{4}, max_candidates_{5};
   double candidate_cluster_hz_{25.0}, candidate_separation_hz_{75.0};
+  double relative_to_top_snr_db_{18.0};
   double blacklist_frequency_hz_{0.0}, blacklist_half_width_hz_{0.0};
   bool auto_select_top_{false}, stdin_selection_enabled_{true}, monitor_finished_{false}, selected_{false};
   std::deque<double> samples_;

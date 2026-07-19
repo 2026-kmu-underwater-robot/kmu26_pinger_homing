@@ -330,6 +330,10 @@ def generate_launch_description() -> LaunchDescription:
             "scan_candidate_separation_hz", default_value="75.0",
             description="Do not list sidelobes within this distance of a stronger peak.",
         ),
+        DeclareLaunchArgument(
+            "scan_relative_to_top_snr_db", default_value="18.0",
+            description="Hide qualified peaks this far below the strongest; set 0 to keep all.",
+        ),
         DeclareLaunchArgument("selection_timeout_s", default_value="90.0"),
         DeclareLaunchArgument(
             "gui_rc_handoff",
@@ -380,6 +384,9 @@ def generate_launch_description() -> LaunchDescription:
             ),
             "candidate_separation_hz": ParameterValue(
                 LaunchConfiguration("scan_candidate_separation_hz"), value_type=float
+            ),
+            "relative_to_top_snr_db": ParameterValue(
+                LaunchConfiguration("scan_relative_to_top_snr_db"), value_type=float
             ),
             "auto_select_top": False,
             "selected_frequency_topic": LaunchConfiguration("selected_frequency_topic"),

@@ -77,7 +77,9 @@ noise-floor SNR, local peak prominence, 그리고 반복 검출 횟수로 판정
 interpolation으로 100 Hz 단위로 반올림하지 않는다. 기본 품질 기준은 `SNR >= 9 dB`,
 prominence `>= 4.5 dB`, 반복 FFT window `>= 4`회다. `scan_fft_size`,
 `scan_min_snr_db`, `scan_min_peak_prominence_db`, `scan_minimum_candidate_hits` launch
-파라미터로 수조/실물 잡음 환경에 맞출 수 있다. 선택 결과는 현재 실행에만 유효하며
+파라미터로 수조/실물 잡음 환경에 맞출 수 있다. 또 최고 후보보다 기본 18 dB 이상 약한
+고정 스펙트럼 피크는 `scan_relative_to_top_snr_db`로 목록에서 제외한다(모든 후보를
+보고 싶으면 `:=0`). 선택 결과는 현재 실행에만 유효하며
 이전 DDS 실행의 주파수 선택을 재사용하지 않는다.
 `ros2 launch`에 직접 입력한 표준입력은 ROS launch 자식 노드로 전달되지 않으므로,
 수동 선택에는 위 wrapper를 사용한다. SNR 모드는
