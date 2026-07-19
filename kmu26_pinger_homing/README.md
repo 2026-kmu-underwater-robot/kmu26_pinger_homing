@@ -8,8 +8,8 @@
 구성:
 
 - forked `audio_capture/audio_phase_estimator`
-- moving-sensor 3D source fit
-- active-range RC controller
+- canonical C++ Phase/SNR RC controller (`pinger_homing_controller`)
+- moving-sensor source fit and no-odometry ABBA/Huber Phase bearing mode
 - exclusive `/mavros/rc/override` mux
 - Pinger Homing Web GUI
 
@@ -51,8 +51,11 @@ GUI와 launch는 자동 아밍하지 않는다. odometry, audio, MAVROS state가
 ## 통합 2-D Phase/SNR 모드
 
 `pinger_homing_test_tank.launch.py`는 이 패키지에 포함된 주파수 선택기,
-오디오 IQ/Phase 추정기, 2-D ALT_HOLD RC 제어기를 함께 실행한다. 별도의
-별도 finger 패키지는 사용하지 않는다.
+오디오 IQ/Phase 추정기, 그리고 **동일한 canonical C++ controller**를 함께
+실행한다. 기본 프로파일은 `ALT_HOLD + no_odom_phase + XY-only`이다.
+즉 `/odometry/filtered`나 MuJoCo ground truth를 제어 입력으로 사용하지 않고,
+MAVROS IMU yaw와 알려진 RC ABBA probe의 위상 거리 변화만으로 방위를 재추정한다.
+Z는 ALT_HOLD가 소유하므로 RC3/heave를 명령하지 않는다.
 
 ```bash
 ros2 run kmu26_pinger_homing start_pinger_homing_test_tank.sh \
@@ -61,7 +64,14 @@ ros2 run kmu26_pinger_homing start_pinger_homing_test_tank.sh \
 ```
 
 이 wrapper는 5초 감시가 끝난 뒤 같은 터미널에서 후보 번호 또는 Hz를 받는다.
+후보는 100 Hz coarse scan 뒤 마지막 PCM window에서 2 Hz 간격으로 정밀 탐색되어,
+예를 들어 21164 Hz 수조 송신기를 21200 Hz로 잘못 고르는 일을 막는다. 선택 결과는
+현재 실행에만 유효하며 이전 DDS 실행의 주파수 선택을 재사용하지 않는다.
 `ros2 launch`에 직접 입력한 표준입력은 ROS launch 자식 노드로 전달되지 않으므로,
 수동 선택에는 위 wrapper를 사용한다. SNR 모드는
 `estimator_mode:=snr`로 선택한다. test-tank에서 최종 RC까지 연결할 때만
 `rc_output_topic:=/mavros/rc/override`를 명시한다.
+
+수조에서 검증된 기본 PWM은 probe `±90`, 접근 `+120` (중립 1500, span 400)이며,
+`probe_pwm_delta:=`와 `approach_pwm_delta:=`로 바꿀 수 있다. 실물의 초기 시험은
+반드시 낮은 PWM(예: ±15--25), `dry_run:=true`, 그리고 프로펠러 제거 상태에서 시작한다.

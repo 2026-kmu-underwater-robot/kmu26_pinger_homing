@@ -26,6 +26,17 @@ add_executable(pinger_homing_2d_controller src/pinger_homing_2d_controller.cpp)
 ament_target_dependencies(pinger_homing_2d_controller geometry_msgs mavros_msgs nav_msgs rclcpp sensor_msgs std_msgs)
 target_include_directories(pinger_homing_2d_controller PRIVATE ${EIGEN3_INCLUDE_DIRS})
 
+# Canonical C++ controller restored from the proven deployed Phase sequence.
+# Keep the older 2-D prototype built for comparison, but do not make a launch
+# path depend on it: the canonical controller owns the production contracts.
+add_executable(pinger_homing_controller
+  src/pinger_homing/pinger_homing_controller.cpp)
+target_compile_features(pinger_homing_controller PUBLIC cxx_std_17)
+ament_target_dependencies(
+  pinger_homing_controller rclcpp geometry_msgs
+  mavros_msgs nav_msgs sensor_msgs std_msgs)
+target_link_libraries(pinger_homing_controller Eigen3::Eigen)
+
 add_executable(rc_override_mux src/rc_override_mux.cpp)
 target_compile_features(rc_override_mux PUBLIC cxx_std_17)
 ament_target_dependencies(rc_override_mux rclcpp mavros_msgs std_msgs)
@@ -78,6 +89,7 @@ install(TARGETS
   pinger_audio_estimator
   pinger_frequency_selector
   pinger_homing_2d_controller
+  pinger_homing_controller
   rc_override_mux
   DESTINATION lib/${PROJECT_NAME})
 

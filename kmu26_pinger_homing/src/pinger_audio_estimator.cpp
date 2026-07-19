@@ -41,7 +41,7 @@ class FingerAudioEstimator final : public rclcpp::Node {
     snr_stamped_pub_ = create_publisher<audio_common_msgs::msg::Float64Stamped>(
         "/pinger_homing/iq_snr_db_stamped", 20);
     selected_sub_ = create_subscription<std_msgs::msg::Float64>(
-        selected_topic_, rclcpp::QoS(1).transient_local(),
+        selected_topic_, rclcpp::QoS(1),
         [this](const std_msgs::msg::Float64::SharedPtr msg) {
           if (std::isfinite(msg->data) && msg->data > 1000.0) {
             reference_frequency_ = msg->data;

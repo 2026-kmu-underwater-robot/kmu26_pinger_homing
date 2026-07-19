@@ -37,11 +37,19 @@ class FingerFrequencySelector final : public rclcpp::Node {
     min_frequency_ = declare_parameter<double>("min_frequency_hz", 15000.0);
     max_frequency_ = declare_parameter<double>("max_frequency_hz", 25000.0);
     frequency_step_ = std::clamp(declare_parameter<double>("frequency_step_hz", 100.0), 25.0, 500.0);
+    fine_frequency_step_ = std::clamp(
+        declare_parameter<double>("fine_frequency_step_hz", 2.0), 0.25, 10.0);
+    fine_half_width_ = std::clamp(
+        declare_parameter<double>("fine_half_width_hz", 75.0), 10.0, 250.0);
     window_size_ = std::clamp(static_cast<int>(declare_parameter<int>("window_size", 4096)), 512, 16384);
     hop_size_ = std::clamp(static_cast<int>(declare_parameter<int>("hop_size", 4096)), 512, window_size_);
     auto_select_top_ = declare_parameter<bool>("auto_select_top", false);
+    // A frequency choice is valid only for this five-second scan.  Do not
+    // latch it: a new test-tank launch must never start probing from the
+    // previous run's DDS history and then have its Phase accumulator reset
+    // underneath an active ABBA leg.
     selected_pub_ = create_publisher<std_msgs::msg::Float64>(
-        selected_topic_, rclcpp::QoS(1).transient_local());
+        selected_topic_, rclcpp::QoS(1));
     candidate_pub_ = create_publisher<std_msgs::msg::String>(
         candidate_topic_, rclcpp::QoS(1).transient_local());
     audio_sub_ = create_subscription<audio_common_msgs::msg::AudioData>(
@@ -98,6 +106,10 @@ class FingerFrequencySelector final : public rclcpp::Node {
   }
 
   void analyze(const std::vector<double> &window) {
+    // Coarse monitoring is intentionally inexpensive. Keep one recent raw
+    // window so the final candidate can be refined without changing the
+    // five-second operator workflow or the upstream audio contract.
+    last_window_ = window;
     double best_frequency = min_frequency_;
     double best_magnitude = -1.0;
     for (double f = min_frequency_; f <= max_frequency_ + 0.5 * frequency_step_; f += frequency_step_) {
@@ -127,10 +139,37 @@ class FingerFrequencySelector final : public rclcpp::Node {
     return values;
   }
 
+  Candidate refine_candidate(Candidate candidate) const {
+    if (last_window_.empty()) return candidate;
+    const double low = std::max(min_frequency_, candidate.frequency - fine_half_width_);
+    const double high = std::min(max_frequency_, candidate.frequency + fine_half_width_);
+    double best_frequency = candidate.frequency;
+    double best_magnitude = -1.0;
+    for (double frequency = low; frequency <= high + 0.5 * fine_frequency_step_;
+         frequency += fine_frequency_step_) {
+      const double value = magnitude(last_window_, frequency);
+      if (value > best_magnitude) {
+        best_magnitude = value;
+        best_frequency = frequency;
+      }
+    }
+    if (best_magnitude >= 0.0) {
+      candidate.frequency = best_frequency;
+      candidate.magnitude = best_magnitude;
+    }
+    return candidate;
+  }
+
+  std::vector<Candidate> refined_ranked() const {
+    auto values = ranked();
+    for (auto &candidate : values) candidate = refine_candidate(candidate);
+    return values;
+  }
+
   void finish_monitor() {
     if (monitor_finished_) return;
     monitor_finished_ = true;
-    const auto values = ranked();
+    const auto values = refined_ranked();
     std::ostringstream json;
     json << "{\"ready\":true,\"candidates\":[";
     for (std::size_t i = 0; i < values.size(); ++i) {
@@ -166,7 +205,7 @@ class FingerFrequencySelector final : public rclcpp::Node {
 
   void select_from_text(const std::string &text) {
     if (!monitor_finished_ || selected_) return;
-    const auto values = ranked();
+    const auto values = refined_ranked();
     try {
       const double value = std::stod(text);
       if (value >= 1.0 && value <= static_cast<double>(values.size()) &&
@@ -196,9 +235,11 @@ class FingerFrequencySelector final : public rclcpp::Node {
   std::string audio_topic_, selected_topic_, candidate_topic_, manual_selection_topic_;
   int sample_rate_{96000}, channels_{2}, channel_index_{0}, window_size_{4096}, hop_size_{4096};
   double monitor_s_{5.0}, min_frequency_{15000.0}, max_frequency_{25000.0}, frequency_step_{100.0};
+  double fine_frequency_step_{2.0}, fine_half_width_{75.0};
   bool auto_select_top_{false}, monitor_finished_{false}, selected_{false};
   std::uint64_t sample_cursor_{0};
   std::deque<double> samples_;
+  std::vector<double> last_window_;
   std::map<double, Candidate> candidates_;
   Clock::time_point started_;
   rclcpp::Subscription<audio_common_msgs::msg::AudioData>::SharedPtr audio_sub_;
