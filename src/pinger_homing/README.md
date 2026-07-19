@@ -37,6 +37,16 @@ reports `feedback_fresh=false` in `/pinger_homing/status` and retains the
 validated fixed timing. It is a timing/adaptation input, never a
 Phase-bearing input.
 
+For the test tank, the validated default keeps an initially confirmed full
+ABBA bearing for a `10 s` tracking window. During that window IMU yaw is
+closed every controller tick and motion response is monitored continuously.
+At the end of the window the controller executes another full ABBA fit and
+replaces the bearing. A single scalar Phase/range-rate stream cannot correct
+left-versus-right error continuously during straight travel; deliberately
+exciting XY at each refresh is the observable feedback step. Keep
+`initial_confirmation_probes:=2` for the first bearing and tune this cadence
+with `approach_duration_s`.
+
 ## Topic boundary
 
 Inputs from the forked hydrophone package:

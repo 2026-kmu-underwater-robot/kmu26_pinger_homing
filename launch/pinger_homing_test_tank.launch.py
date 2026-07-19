@@ -51,7 +51,13 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("probe_neutral_s", default_value="0.35"),
         DeclareLaunchArgument("probe_settle_s", default_value="0.55"),
         DeclareLaunchArgument("probe_sample_delay_s", default_value="0.40"),
-        DeclareLaunchArgument("approach_duration_s", default_value="3.0"),
+        # One complete ABBA estimate is retained for a ten-second tracking
+        # window.  During that window IMU yaw closes the heading loop every
+        # control tick and motion_response checks real XY progress. A fresh
+        # full ABBA fit then replaces the bearing; a scalar Phase stream alone
+        # cannot determine left/right correction continuously without such
+        # deliberate XY excitation.
+        DeclareLaunchArgument("approach_duration_s", default_value="10.0"),
         DeclareLaunchArgument("initial_confirmation_probes", default_value="2"),
         Node(
             package="kmu26_pinger_homing",
