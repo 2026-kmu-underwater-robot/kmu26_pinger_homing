@@ -47,3 +47,19 @@ GUI와 launch는 자동 아밍하지 않는다. odometry, audio, MAVROS state가
 모든 RC 채널을 release한다. 기본 180초 제한 또는 추정 핑거 위치 반경 1.5 m 안에서 1초 유지 시
 접근을 종료하고 RC를 release한다. 실물 IQ 거리 보정 전에는
 `amplitude_range_constant=0`, `success_range_m=0`을 유지한다.
+
+## 통합 2-D Phase/SNR 모드
+
+`pinger_homing_test_tank.launch.py`는 이 패키지에 포함된 주파수 선택기,
+오디오 IQ/Phase 추정기, 2-D ALT_HOLD RC 제어기를 함께 실행한다. 별도의
+`kmu26_finger_homing` 패키지는 사용하지 않는다.
+
+```bash
+ros2 launch kmu26_pinger_homing pinger_homing_test_tank.launch.py \
+  mode:=ALT_HOLD estimator_mode:=phase \
+  auto_select_top:=false dry_run:=false
+```
+
+5초 감시 뒤 터미널에 표시된 후보 번호 또는 Hz를 입력한다. SNR 모드는
+`estimator_mode:=snr`로 선택한다. test-tank에서 최종 RC까지 연결할 때만
+`rc_output_topic:=/mavros/rc/override`를 명시한다.

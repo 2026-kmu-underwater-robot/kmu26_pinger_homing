@@ -17,7 +17,7 @@ namespace kmu26_finger_homing {
 
 class FingerAudioEstimator final : public rclcpp::Node {
  public:
-  FingerAudioEstimator() : Node("finger_audio_estimator") {
+  FingerAudioEstimator() : Node("pinger_audio_estimator") {
     audio_topic_ = declare_parameter<std::string>("audio_topic", "/audio");
     selected_topic_ = declare_parameter<std::string>(
         "selected_frequency_topic", "/finger_homing/selected_frequency_hz");

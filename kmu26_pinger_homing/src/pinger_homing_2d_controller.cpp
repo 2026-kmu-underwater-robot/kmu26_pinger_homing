@@ -23,7 +23,7 @@ namespace kmu26_finger_homing {
 
 class FingerHomingController final : public rclcpp::Node {
  public:
-  FingerHomingController() : Node("finger_homing_controller") {
+  FingerHomingController() : Node("pinger_homing_2d_controller") {
     mode_ = declare_parameter<std::string>("mode", "ALT_HOLD");
     if (mode_ != "ALT_HOLD") throw std::invalid_argument("finger homing requires ALT_HOLD");
     estimator_mode_ = declare_parameter<std::string>("estimator_mode", "phase");
@@ -32,7 +32,7 @@ class FingerHomingController final : public rclcpp::Node {
     }
     odom_topic_ = declare_parameter<std::string>("odometry_topic", "/odometry/filtered");
     rc_topic_ = declare_parameter<std::string>(
-        "rc_output_topic", "/control/finger_homing/rc_override");
+        "rc_output_topic", "/control/pinger/rc_override");
     selected_topic_ = declare_parameter<std::string>(
         "selected_frequency_topic", "/finger_homing/selected_frequency_hz");
     required_mode_ = declare_parameter<std::string>("required_vehicle_mode", "ALT_HOLD");

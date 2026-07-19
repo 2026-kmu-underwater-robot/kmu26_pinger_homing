@@ -10,7 +10,7 @@ def generate_launch_description():
         DeclareLaunchArgument("odometry_topic", default_value="/odometry/filtered"),
         DeclareLaunchArgument("mode", default_value="ALT_HOLD"),
         DeclareLaunchArgument("estimator_mode", default_value="phase"),
-        DeclareLaunchArgument("rc_output_topic", default_value="/control/finger_homing/rc_override"),
+        DeclareLaunchArgument("rc_output_topic", default_value="/control/pinger/rc_override"),
         DeclareLaunchArgument("auto_select_top", default_value="false"),
         DeclareLaunchArgument("require_frequency_selection", default_value="true"),
         DeclareLaunchArgument("dry_run", default_value="false"),
@@ -25,9 +25,9 @@ def generate_launch_description():
         DeclareLaunchArgument("auto_arm", default_value="false"),
         DeclareLaunchArgument("auto_mode", default_value="false"),
         Node(
-            package="kmu26_finger_homing",
-            executable="finger_frequency_selector",
-            name="finger_frequency_selector",
+            package="kmu26_pinger_homing",
+            executable="pinger_frequency_selector",
+            name="pinger_frequency_selector",
             output="screen",
             emulate_tty=True,
             parameters=[{
@@ -37,9 +37,9 @@ def generate_launch_description():
             }],
         ),
         Node(
-            package="kmu26_finger_homing",
-            executable="finger_audio_estimator",
-            name="finger_audio_estimator",
+            package="kmu26_pinger_homing",
+            executable="pinger_audio_estimator",
+            name="pinger_audio_estimator",
             output="screen",
             parameters=[{
                 "use_sim_time": True,
@@ -48,9 +48,9 @@ def generate_launch_description():
             }],
         ),
         Node(
-            package="kmu26_finger_homing",
-            executable="finger_homing_controller",
-            name="finger_homing_controller",
+            package="kmu26_pinger_homing",
+            executable="pinger_homing_2d_controller",
+            name="pinger_homing_2d_controller",
             output="screen",
             parameters=[{
                 "use_sim_time": True,

@@ -22,7 +22,7 @@ namespace kmu26_finger_homing {
 
 class FingerFrequencySelector final : public rclcpp::Node {
  public:
-  FingerFrequencySelector() : Node("finger_frequency_selector") {
+  FingerFrequencySelector() : Node("pinger_frequency_selector") {
     audio_topic_ = declare_parameter<std::string>("audio_topic", "/audio");
     selected_topic_ = declare_parameter<std::string>(
         "selected_frequency_topic", "/finger_homing/selected_frequency_hz");

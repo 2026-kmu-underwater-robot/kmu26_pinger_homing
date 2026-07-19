@@ -7,11 +7,24 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(ament_cmake_python REQUIRED)
+find_package(audio_common_msgs REQUIRED)
+find_package(Eigen3 REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(mavros_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+
+add_executable(pinger_audio_estimator src/pinger_audio_estimator.cpp)
+ament_target_dependencies(pinger_audio_estimator audio_common_msgs rclcpp std_msgs)
+
+add_executable(pinger_frequency_selector src/pinger_frequency_selector.cpp)
+ament_target_dependencies(pinger_frequency_selector audio_common_msgs rclcpp std_msgs)
+
+add_executable(pinger_homing_2d_controller src/pinger_homing_2d_controller.cpp)
+ament_target_dependencies(pinger_homing_2d_controller geometry_msgs mavros_msgs nav_msgs rclcpp std_msgs)
+target_include_directories(pinger_homing_2d_controller PRIVATE ${EIGEN3_INCLUDE_DIRS})
+
 add_executable(rc_override_mux src/rc_override_mux.cpp)
 target_compile_features(rc_override_mux PUBLIC cxx_std_17)
 ament_target_dependencies(rc_override_mux rclcpp mavros_msgs std_msgs)
@@ -48,6 +61,10 @@ if(BUILD_TESTING)
     NAME pinger_hydrophone_repository_boundary
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/test/test_repository_boundaries.py)
+  add_test(
+    NAME pinger_2d_homing_contract
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/test_2d_homing_contract.py)
   set_tests_properties(single_hydrophone_homing_math PROPERTIES TIMEOUT 30)
   set_tests_properties(pinger_homing_dry_run PROPERTIES TIMEOUT 15)
   set_tests_properties(pinger_homing_live_runtime PROPERTIES TIMEOUT 15)
@@ -56,7 +73,12 @@ if(BUILD_TESTING)
   set_tests_properties(pinger_hydrophone_repository_boundary PROPERTIES TIMEOUT 10)
 endif()
 
-install(TARGETS rc_override_mux DESTINATION lib/${PROJECT_NAME})
+install(TARGETS
+  pinger_audio_estimator
+  pinger_frequency_selector
+  pinger_homing_2d_controller
+  rc_override_mux
+  DESTINATION lib/${PROJECT_NAME})
 
 install(PROGRAMS
   src/pinger_homing/single_hydrophone_homing_controller.py
