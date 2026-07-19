@@ -1,0 +1,343 @@
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <deque>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include <Eigen/Dense>
+#include <geometry_msgs/msg/vector3_stamped.hpp>
+#include <mavros_msgs/msg/override_rc_in.hpp>
+#include <mavros_msgs/msg/state.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/string.hpp>
+
+namespace kmu26_finger_homing {
+
+class FingerHomingController final : public rclcpp::Node {
+ public:
+  FingerHomingController() : Node("finger_homing_controller") {
+    mode_ = declare_parameter<std::string>("mode", "ALT_HOLD");
+    if (mode_ != "ALT_HOLD") throw std::invalid_argument("finger homing requires ALT_HOLD");
+    estimator_mode_ = declare_parameter<std::string>("estimator_mode", "phase");
+    if (estimator_mode_ != "phase" && estimator_mode_ != "snr") {
+      throw std::invalid_argument("estimator_mode must be phase or snr");
+    }
+    odom_topic_ = declare_parameter<std::string>("odometry_topic", "/odometry/filtered");
+    rc_topic_ = declare_parameter<std::string>(
+        "rc_output_topic", "/control/finger_homing/rc_override");
+    selected_topic_ = declare_parameter<std::string>(
+        "selected_frequency_topic", "/finger_homing/selected_frequency_hz");
+    required_mode_ = declare_parameter<std::string>("required_vehicle_mode", "ALT_HOLD");
+    rc_span_ = std::clamp(declare_parameter<double>("rc_pwm_span", 400.0), 50.0, 700.0);
+    probe_command_ = std::clamp(declare_parameter<double>("probe_command", 0.20), 0.05, 0.45);
+    forward_command_ = std::clamp(declare_parameter<double>("forward_command", 0.28), 0.05, 0.65);
+    lateral_command_ = std::clamp(declare_parameter<double>("lateral_command", 0.22), 0.05, 0.5);
+    probe_leg_s_ = std::clamp(declare_parameter<double>("probe_leg_s", 0.8), 0.3, 3.0);
+    probe_neutral_s_ = std::clamp(declare_parameter<double>("probe_neutral_s", 0.3), 0.1, 2.0);
+    probe_settle_s_ = std::clamp(declare_parameter<double>("probe_settle_s", 0.5), 0.1, 2.0);
+    reprobe_s_ = std::clamp(declare_parameter<double>("reprobe_s", 7.0), 2.0, 30.0);
+    success_range_m_ = std::max(0.0, declare_parameter<double>("success_range_m", 1.2));
+    range_constant_ = std::max(0.0, declare_parameter<double>("amplitude_range_constant", 0.325));
+    min_snr_db_ = declare_parameter<double>("min_snr_db", 3.0);
+    min_samples_ = std::max(8, static_cast<int>(declare_parameter<int>("min_samples", 16)));
+    yaw_gain_ = std::clamp(declare_parameter<double>("yaw_gain", 0.65), 0.05, 2.0);
+    yaw_rate_gain_ = std::clamp(declare_parameter<double>("yaw_rate_gain", 0.25), 0.0, 1.0);
+    yaw_limit_ = std::clamp(declare_parameter<double>("yaw_limit", 0.30), 0.05, 0.7);
+    align_rad_ = declare_parameter<double>("align_deg", 18.0) * M_PI / 180.0;
+    max_runtime_s_ = std::max(10.0, declare_parameter<double>("max_runtime_s", 180.0));
+    auto_arm_ = declare_parameter<bool>("auto_arm", false);
+    auto_mode_ = declare_parameter<bool>("auto_mode", false);
+    dry_run_ = declare_parameter<bool>("dry_run", false);
+
+    rc_pub_ = create_publisher<mavros_msgs::msg::OverrideRCIn>(rc_topic_, 10);
+    status_pub_ = create_publisher<std_msgs::msg::String>("/finger_homing/status", 10);
+    direction_pub_ = create_publisher<geometry_msgs::msg::Vector3Stamped>(
+        "/finger_homing/direction", 10);
+    odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+        odom_topic_, rclcpp::SensorDataQoS(),
+        [this](const nav_msgs::msg::Odometry::SharedPtr msg) { on_odom(*msg); });
+    state_sub_ = create_subscription<mavros_msgs::msg::State>(
+        "/mavros/state", 10,
+        [this](const mavros_msgs::msg::State::SharedPtr msg) {
+          armed_ = msg->armed; vehicle_mode_ = msg->mode; last_state_ = now();
+        });
+    frequency_sub_ = create_subscription<std_msgs::msg::Float64>(
+        selected_topic_, rclcpp::QoS(1).transient_local(),
+        [this](const std_msgs::msg::Float64::SharedPtr msg) {
+          if (std::isfinite(msg->data) && msg->data > 1000.0) {
+            selected_ = true;
+            selected_hz_ = msg->data;
+            active_started_ = Clock::now();
+          }
+        });
+    delta_sub_ = create_subscription<std_msgs::msg::Float64>(
+        "/finger_homing/delta_range_m", 30,
+        [this](const std_msgs::msg::Float64::SharedPtr msg) { on_delta(msg->data); });
+    iq_sub_ = create_subscription<std_msgs::msg::Float64>(
+        "/finger_homing/iq_magnitude", 30,
+        [this](const std_msgs::msg::Float64::SharedPtr msg) { if (std::isfinite(msg->data)) iq_=msg->data; });
+    snr_sub_ = create_subscription<std_msgs::msg::Float64>(
+        "/finger_homing/iq_snr_db", 30,
+        [this](const std_msgs::msg::Float64::SharedPtr msg) { on_snr(msg->data); });
+    timer_ = create_wall_timer(std::chrono::milliseconds(33), [this]() { tick(); });
+    state_started_ = std::chrono::steady_clock::now();
+    RCLCPP_INFO(get_logger(), "standalone 2-D %s homing ready: ALT_HOLD, rc=%s",
+                estimator_mode_.c_str(), rc_topic_.c_str());
+  }
+
+ private:
+  using Clock = std::chrono::steady_clock;
+  using Time = Clock::time_point;
+  struct Obs { double x{0.0}, y{0.0}, t{0.0}, value{0.0}; };
+  enum class State { WAIT_FREQUENCY, WAIT_VEHICLE, PROBE, ALIGN, APPROACH, SUCCESS, FAILED };
+
+  static double elapsed(Time from) {
+    return std::chrono::duration<double>(Clock::now() - from).count();
+  }
+  static int pwm(double command, double span) {
+    return static_cast<int>(std::llround(1500.0 + std::clamp(command, -1.0, 1.0) * span));
+  }
+  static double yaw_from_quaternion(const geometry_msgs::msg::Quaternion &q) {
+    return std::atan2(2.0 * (q.w * q.z + q.x * q.y),
+                      1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+  }
+
+  void on_odom(const nav_msgs::msg::Odometry &msg) {
+    x_ = msg.pose.pose.position.x; y_ = msg.pose.pose.position.y;
+    yaw_ = yaw_from_quaternion(msg.pose.pose.orientation);
+    yaw_rate_ = msg.twist.twist.angular.z;
+    have_odom_ = true; last_odom_ = now();
+  }
+  void on_delta(double value) {
+    if (!std::isfinite(value)) return;
+    last_audio_ = now();
+    cumulative_range_ += std::clamp(value, -0.15, 0.15);
+    if (state_ == State::PROBE && have_odom_) {
+      obs_.push_back({x_, y_, elapsed(state_started_), cumulative_range_});
+      if (obs_.size() > 500U) obs_.pop_front();
+    }
+  }
+  void on_snr(double value) {
+    if (!std::isfinite(value) || value < min_snr_db_) return;
+    last_snr_ = value;
+    if (state_ == State::PROBE && have_odom_) {
+      snr_obs_.push_back({x_, y_, elapsed(state_started_), value});
+      if (snr_obs_.size() > 500U) snr_obs_.pop_front();
+    }
+  }
+
+  void transition(State next) {
+    state_ = next; state_started_ = Clock::now();
+    if (next == State::PROBE) { obs_.clear(); snr_obs_.clear(); cumulative_range_ = 0.0; }
+    RCLCPP_INFO(get_logger(), "finger homing state -> %s", state_name(next).c_str());
+  }
+  static std::string state_name(State state) {
+    switch (state) {
+      case State::WAIT_FREQUENCY: return "WAIT_FREQUENCY";
+      case State::WAIT_VEHICLE: return "WAIT_VEHICLE";
+      case State::PROBE: return "PROBE_2D";
+      case State::ALIGN: return "ALIGN";
+      case State::APPROACH: return "APPROACH";
+      case State::SUCCESS: return "SUCCESS";
+      default: return "FAILED";
+    }
+  }
+
+  std::optional<Eigen::Vector2d> fit_direction() const {
+    const auto &samples = estimator_mode_ == "snr" ? snr_obs_ : obs_;
+    if (samples.size() < static_cast<std::size_t>(min_samples_)) return std::nullopt;
+    Eigen::MatrixXd A(static_cast<Eigen::Index>(samples.size()), 4);
+    Eigen::VectorXd b(static_cast<Eigen::Index>(samples.size()));
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+      A(static_cast<Eigen::Index>(i), 0) = 1.0;
+      A(static_cast<Eigen::Index>(i), 1) = samples[i].t;
+      A(static_cast<Eigen::Index>(i), 2) = samples[i].x;
+      A(static_cast<Eigen::Index>(i), 3) = samples[i].y;
+      b(static_cast<Eigen::Index>(i)) = samples[i].value;
+    }
+    Eigen::VectorXd fit = A.colPivHouseholderQr().solve(b);
+    if (estimator_mode_ == "snr") {
+      // SNR data can contain short multipath spikes.  Use a small Huber IRLS
+      // pass, matching the robust-gradient contract of the reference SNR
+      // implementation while keeping this package self contained.
+      for (int iteration = 0; iteration < 4; ++iteration) {
+        const Eigen::VectorXd residual = b - A * fit;
+        std::vector<double> abs_residual;
+        abs_residual.reserve(static_cast<std::size_t>(residual.size()));
+        for (Eigen::Index i = 0; i < residual.size(); ++i) {
+          abs_residual.push_back(std::abs(residual(i)));
+        }
+        std::nth_element(abs_residual.begin(), abs_residual.begin() + abs_residual.size() / 2,
+                         abs_residual.end());
+        const double scale = std::max(1.0e-3, 1.4826 * abs_residual[abs_residual.size() / 2]);
+        Eigen::VectorXd weights(residual.size());
+        for (Eigen::Index i = 0; i < residual.size(); ++i) {
+          const double u = std::abs(residual(i)) / (1.5 * scale);
+          weights(i) = u <= 1.0 ? 1.0 : 1.0 / u;
+        }
+        Eigen::MatrixXd weighted_a = A;
+        Eigen::VectorXd weighted_b = b;
+        for (Eigen::Index i = 0; i < residual.size(); ++i) {
+          const double root = std::sqrt(std::max(weights(i), 1.0e-4));
+          weighted_a.row(i) *= root;
+          weighted_b(i) *= root;
+        }
+        fit = weighted_a.colPivHouseholderQr().solve(weighted_b);
+      }
+    }
+    if (!fit.allFinite()) return std::nullopt;
+    Eigen::Vector2d direction = estimator_mode_ == "snr"
+        ? Eigen::Vector2d(fit(2), fit(3))
+        : Eigen::Vector2d(-fit(2), -fit(3));
+    if (!direction.allFinite() || direction.norm() < 1.0e-5) return std::nullopt;
+    return direction.normalized();
+  }
+
+  void probe_command(double t, double &forward, double &lateral) const {
+    forward = lateral = 0.0;
+    double rem = t - probe_settle_s_;
+    if (rem < 0.0) return;
+    const int axes[] = {1, -1, -1, 1, 2, -2, -2, 2};
+    for (const int axis : axes) {
+      if (rem < probe_leg_s_) {
+        if (axis == 1) forward = probe_command_;
+        if (axis == -1) forward = -probe_command_;
+        if (axis == 2) lateral = probe_command_;
+        if (axis == -2) lateral = -probe_command_;
+        return;
+      }
+      rem -= probe_leg_s_;
+      if (rem < probe_neutral_s_) return;
+      rem -= probe_neutral_s_;
+    }
+  }
+  double probe_duration() const { return probe_settle_s_ + 8.0 * (probe_leg_s_ + probe_neutral_s_); }
+
+  void tick() {
+    if (state_ == State::SUCCESS || state_ == State::FAILED) {
+      publish_release();
+      publish_status();
+      return;
+    }
+    if (!selected_) { transition_if_needed(State::WAIT_FREQUENCY); publish_neutral(); publish_status(); return; }
+    if (!have_odom_ || (now() - last_odom_).seconds() > 1.0) {
+      transition_if_needed(State::WAIT_VEHICLE); publish_neutral(); publish_status(); return;
+    }
+    if (auto_mode_ && vehicle_mode_ != required_mode_) {
+      publish_neutral(); publish_status(); return;
+    }
+    if (!dry_run_ && auto_arm_ && !armed_) { publish_neutral(); publish_status(); return; }
+    if (elapsed(active_started_) > max_runtime_s_) { transition(State::FAILED); publish_release(); publish_status(); return; }
+    if (state_ == State::WAIT_FREQUENCY || state_ == State::WAIT_VEHICLE) transition(State::PROBE);
+    if (state_ == State::PROBE) {
+      if (elapsed(state_started_) >= probe_duration()) {
+        const auto direction = fit_direction();
+        if (!direction) { transition(State::FAILED); publish_release(); publish_status(); return; }
+        if (direction_world_ && direction_world_->dot(*direction) > 0.25) {
+          *direction_world_ = (0.75 * (*direction_world_) + 0.25 * (*direction)).normalized();
+        } else {
+          direction_world_ = *direction;
+        }
+        transition(State::ALIGN);
+      } else {
+        double f = 0.0, l = 0.0; probe_command(elapsed(state_started_), f, l); publish_command(f, l, 0.0); publish_status(); return;
+      }
+    }
+    if (range_constant_ > 0.0 && iq_ > 1.0e-9 &&
+        range_constant_ / std::sqrt(iq_) <= success_range_m_) {
+      transition(State::SUCCESS); publish_release(); publish_status(); return;
+    }
+    if (!direction_world_) { transition(State::PROBE); publish_neutral(); return; }
+    const double forward_axis = std::cos(yaw_) * direction_world_->x() + std::sin(yaw_) * direction_world_->y();
+    const double lateral_axis = -std::sin(yaw_) * direction_world_->x() + std::cos(yaw_) * direction_world_->y();
+    const double bearing = std::atan2(lateral_axis, forward_axis);
+    const double yaw = std::clamp(yaw_gain_ * bearing - yaw_rate_gain_ * yaw_rate_,
+                                  -yaw_limit_, yaw_limit_);
+    if (std::abs(bearing) > align_rad_) {
+      transition_if_needed(State::ALIGN); publish_command(0.0, 0.0, yaw); publish_status(); return;
+    }
+    if (state_ == State::ALIGN) transition(State::APPROACH);
+    if (elapsed(state_started_) > reprobe_s_) { transition(State::PROBE); publish_neutral(); publish_status(); return; }
+    publish_command(std::clamp(forward_command_ * std::max(0.0, forward_axis), 0.0, forward_command_),
+                    std::clamp(lateral_command_ * lateral_axis, -lateral_command_, lateral_command_), yaw);
+    publish_status();
+  }
+
+  void transition_if_needed(State next) { if (state_ != next) transition(next); }
+  rclcpp::Time now() { return get_clock()->now(); }
+  void publish_command(double forward, double lateral, double yaw) {
+    mavros_msgs::msg::OverrideRCIn msg;
+    msg.channels.fill(mavros_msgs::msg::OverrideRCIn::CHAN_NOCHANGE);
+    msg.channels.fill(1500);
+    msg.channels[2] = 1500;  // ALT_HOLD owns heave; this package never commands Z.
+    // The vehicle contract maps positive RC yaw to positive body yaw.  The
+    // bearing above is already in the body convention, so do not mirror it.
+    msg.channels[3] = static_cast<uint16_t>(pwm(yaw, rc_span_));
+    msg.channels[4] = static_cast<uint16_t>(pwm(forward, rc_span_));
+    msg.channels[5] = static_cast<uint16_t>(pwm(lateral, rc_span_));
+    last_forward_ = forward; last_lateral_ = lateral; last_yaw_ = yaw;
+    if (!dry_run_) rc_pub_->publish(msg);
+  }
+  void publish_neutral() { publish_command(0.0, 0.0, 0.0); }
+  void publish_release() {
+    mavros_msgs::msg::OverrideRCIn msg;
+    msg.channels.fill(mavros_msgs::msg::OverrideRCIn::CHAN_RELEASE);
+    if (!dry_run_) rc_pub_->publish(msg);
+  }
+  void publish_status() {
+    std::ostringstream json;
+    json << "{\"state\":\"" << state_name(state_) << "\",\"mode\":\"" << mode_
+         << "\",\"estimator\":\"" << estimator_mode_ << "\",\"selected_hz\":"
+         << (selected_ ? selected_hz_ : 0.0) << ",\"direction\":["
+         << (direction_world_ ? (*direction_world_).x() : 0.0) << ","
+         << (direction_world_ ? (*direction_world_).y() : 0.0) << ",0],\"rc\":["
+         << last_forward_ << "," << last_lateral_ << "," << last_yaw_ << "],\"dry_run\":"
+         << (dry_run_ ? "true" : "false") << "}";
+    std_msgs::msg::String msg; msg.data = json.str(); status_pub_->publish(msg);
+    if (direction_world_) {
+      geometry_msgs::msg::Vector3Stamped direction;
+      direction.header.stamp = now(); direction.header.frame_id = "odom";
+      direction.vector.x = direction_world_->x(); direction.vector.y = direction_world_->y(); direction.vector.z = 0.0;
+      direction_pub_->publish(direction);
+    }
+  }
+
+  std::string mode_, estimator_mode_, odom_topic_, rc_topic_, selected_topic_, required_mode_;
+  double rc_span_{400.0}, probe_command_{0.2}, forward_command_{0.28}, lateral_command_{0.22};
+  double probe_leg_s_{0.8}, probe_neutral_s_{0.3}, probe_settle_s_{0.5}, reprobe_s_{7.0};
+  double success_range_m_{1.2}, range_constant_{0.325}, min_snr_db_{3.0};
+  int min_samples_{16};
+  double yaw_gain_{0.65}, yaw_rate_gain_{0.25}, yaw_limit_{0.30}, align_rad_{0.31}, max_runtime_s_{180.0};
+  bool auto_arm_{false}, auto_mode_{false}, dry_run_{false}, selected_{false}, armed_{false}, have_odom_{false};
+  double selected_hz_{0.0}, x_{0.0}, y_{0.0}, yaw_{0.0}, yaw_rate_{0.0}, cumulative_range_{0.0}, iq_{0.0}, last_snr_{0.0};
+  double last_forward_{0.0}, last_lateral_{0.0}, last_yaw_{0.0};
+  std::optional<Eigen::Vector2d> direction_world_;
+  std::deque<Obs> obs_, snr_obs_;
+  State state_{State::WAIT_FREQUENCY}; Time state_started_{}, active_started_{Clock::now()};
+  rclcpp::Time last_odom_{0, 0, RCL_ROS_TIME}, last_audio_{0, 0, RCL_ROS_TIME}, last_state_{0, 0, RCL_ROS_TIME};
+  std::string vehicle_mode_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr frequency_sub_, delta_sub_, iq_sub_, snr_sub_;
+  rclcpp::Publisher<mavros_msgs::msg::OverrideRCIn>::SharedPtr rc_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr direction_pub_;
+  rclcpp::TimerBase::SharedPtr timer_;
+};
+
+}  // namespace kmu26_finger_homing
+
+int main(int argc, char **argv) {
+  rclcpp::init(argc, argv);
+  rclcpp::spin(std::make_shared<kmu26_finger_homing::FingerHomingController>());
+  rclcpp::shutdown();
+  return 0;
+}
