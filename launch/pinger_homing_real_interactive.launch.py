@@ -328,12 +328,16 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("manual_selection_topic", default_value="/pinger_homing/manual_selection"),
         DeclareLaunchArgument("scan_monitor_s", default_value="5.0"),
         DeclareLaunchArgument(
-            "scan_fft_size", default_value="8192",
-            description="FFT length for the frequency scan (96000/8192 = 11.72 Hz bins).",
+            "scan_fft_size", default_value="16384",
+            description=(
+                "Hydrophone FFT length (96000/16384 = 5.86 Hz bins). "
+                "The real profile prioritizes carrier discrimination over the "
+                "simulator's faster 8192-sample scan."
+            ),
         ),
         DeclareLaunchArgument(
-            "scan_fft_hop_size", default_value="4096",
-            description="FFT scan hop; 4096 gives 50% overlap.",
+            "scan_fft_hop_size", default_value="8192",
+            description="FFT scan hop; 8192 gives 50% overlap for the 16384-sample hydrophone scan.",
         ),
         DeclareLaunchArgument(
             "scan_min_snr_db", default_value="9.0",

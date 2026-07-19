@@ -48,6 +48,9 @@ def test_interactive_launch_scans_then_injects_selected_startup_frequency() -> N
     assert 'launch_arguments["reference_frequency_hz"]' in launch
     assert 'launch_arguments["use_audio_capture"] = "false"' in launch
     assert 'gui_rc_handoff' in launch
+    assert '"scan_fft_size", default_value="16384"' in launch
+    assert '"scan_fft_hop_size", default_value="8192"' in launch
+    assert "96000/16384 = 5.86 Hz bins" in launch
     assert 'gui_rc_handoff_service' in launch
     assert 'gui_rc_restore_service' in launch
     assert 'default_value="/uuv_web_control_gui/suspend_rc_override"' in launch

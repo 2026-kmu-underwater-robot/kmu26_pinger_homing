@@ -39,6 +39,12 @@ ros2 launch kmu26_pinger_homing pinger_homing_real_interactive.launch.py \
 같은 터미널에서 받는다. 선택한 주파수로 기존 `audio_phase_estimator`를
 시작한 뒤, 검증된 C++ no-odometry Phase 제어기를 실행한다.
 
+실물 interactive launch는 고정 pinger carrier를 더 잘 구분하도록 기본
+`scan_fft_size:=16384`, `scan_fft_hop_size:=8192`를 사용한다. 따라서 96 kHz
+하이드로폰에서는 **5.86 Hz/bin** (48 kHz에서는 2.93 Hz/bin)이며, 5초 스캔에서도
+각각 약 57회/28회의 50% 중첩 FFT 창이 남는다. 수조 시뮬레이터의 generic selector
+기본값 8192는 빠른 반복 시험용으로 그대로 유지된다.
+
 C++ launch는 자동 아밍하지 않는다. audio, MAVROS state 또는 IMU가
 stale이거나 disarm/ALT_HOLD 이탈이면 모든 RC 채널을 release한다. 실물 IQ
 거리 보정 전에는 `amplitude_range_constant=0`, `success_range_m=0`을 유지한다.
