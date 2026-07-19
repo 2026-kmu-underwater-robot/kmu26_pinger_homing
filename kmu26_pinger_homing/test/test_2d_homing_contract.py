@@ -15,6 +15,10 @@ def test_alt_hold_and_private_rc_defaults():
     assert 'declare_parameter<std::string>("mode", "ALT_HOLD")' in text
     assert '"/control/pinger/rc_override"' in text
     assert 'msg.channels[2] = 1500' in text
+    assert 'declare_parameter<std::string>("imu_topic", "/mavros/imu/data")' in text
+    assert 'declare_parameter<bool>("invert_rc_yaw", true)' in text
+    assert 'pwm(invert_rc_yaw_ ? -yaw : yaw, rc_span_)' in text
+    assert '"mavros_imu_aligned"' in text
 
 
 def test_frequency_selection_contract():
@@ -31,6 +35,8 @@ def test_manual_selection_wrapper_waits_for_ros_discovery():
     assert 'grep -Fxq "/pinger_homing/frequency_candidates"' in wrapper
     assert 'ros2 topic echo --once /pinger_homing/frequency_candidates' in wrapper
     assert "manual_selection" in wrapper
+    assert "setsid ros2 launch" in wrapper
+    assert 'kill -INT -- "-${launch_pid}"' in wrapper
 
 
 def test_xy_only_controller():

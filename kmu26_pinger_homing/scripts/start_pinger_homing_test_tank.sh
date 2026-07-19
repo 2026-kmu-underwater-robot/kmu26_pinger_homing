@@ -5,13 +5,15 @@ launch_pid=""
 
 cleanup() {
   if [[ -n "${launch_pid}" ]] && kill -0 "${launch_pid}" 2>/dev/null; then
-    kill -INT "${launch_pid}" 2>/dev/null || true
+    # launch and all child ROS nodes run in their own session.  Terminate the
+    # process group so a wrapper error cannot leave an RC controller orphaned.
+    kill -INT -- "-${launch_pid}" 2>/dev/null || true
     wait "${launch_pid}" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT INT TERM
 
-ros2 launch kmu26_pinger_homing pinger_homing_test_tank.launch.py "$@" auto_select_top:=false &
+setsid ros2 launch kmu26_pinger_homing pinger_homing_test_tank.launch.py "$@" auto_select_top:=false &
 launch_pid=$!
 
 echo "[pinger] Waiting for the five-second frequency scan..."

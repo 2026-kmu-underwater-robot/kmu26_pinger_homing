@@ -16,6 +16,7 @@
 #include <mavros_msgs/msg/state.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/imu.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/string.hpp>
 
@@ -31,6 +32,9 @@ class FingerHomingController final : public rclcpp::Node {
       throw std::invalid_argument("estimator_mode must be phase or snr");
     }
     odom_topic_ = declare_parameter<std::string>("odometry_topic", "/odometry/filtered");
+    imu_topic_ = declare_parameter<std::string>("imu_topic", "/mavros/imu/data");
+    use_imu_yaw_ = declare_parameter<bool>("use_imu_yaw", true);
+    imu_timeout_s_ = std::clamp(declare_parameter<double>("imu_timeout_s", 0.5), 0.05, 5.0);
     rc_topic_ = declare_parameter<std::string>(
         "rc_output_topic", "/control/pinger/rc_override");
     selected_topic_ = declare_parameter<std::string>(
@@ -56,6 +60,11 @@ class FingerHomingController final : public rclcpp::Node {
     auto_arm_ = declare_parameter<bool>("auto_arm", false);
     auto_mode_ = declare_parameter<bool>("auto_mode", false);
     dry_run_ = declare_parameter<bool>("dry_run", false);
+    // MAVROS/ArduSub yaw is NED/right-positive, while the acoustic direction
+    // is published in ROS base_link FLU (left-positive).  Keep the logical
+    // controller command in FLU and apply this transport conversion only at
+    // RC4.  This matches the established Python controller contract.
+    invert_rc_yaw_ = declare_parameter<bool>("invert_rc_yaw", true);
 
     rc_pub_ = create_publisher<mavros_msgs::msg::OverrideRCIn>(rc_topic_, 10);
     status_pub_ = create_publisher<std_msgs::msg::String>("/pinger_homing/status", 10);
@@ -68,6 +77,9 @@ class FingerHomingController final : public rclcpp::Node {
     odom_sub_ = create_subscription<nav_msgs::msg::Odometry>(
         odom_topic_, rclcpp::SensorDataQoS(),
         [this](const nav_msgs::msg::Odometry::SharedPtr msg) { on_odom(*msg); });
+    imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
+        imu_topic_, rclcpp::SensorDataQoS(),
+        [this](const sensor_msgs::msg::Imu::SharedPtr msg) { on_imu(*msg); });
     state_sub_ = create_subscription<mavros_msgs::msg::State>(
         "/mavros/state", 10,
         [this](const mavros_msgs::msg::State::SharedPtr msg) {
@@ -93,8 +105,10 @@ class FingerHomingController final : public rclcpp::Node {
         [this](const std_msgs::msg::Float64::SharedPtr msg) { on_snr(msg->data); });
     timer_ = create_wall_timer(std::chrono::milliseconds(33), [this]() { tick(); });
     state_started_ = std::chrono::steady_clock::now();
-    RCLCPP_INFO(get_logger(), "standalone 2-D %s homing ready: ALT_HOLD, rc=%s",
-                estimator_mode_.c_str(), rc_topic_.c_str());
+    RCLCPP_INFO(get_logger(),
+                "standalone 2-D %s homing ready: ALT_HOLD, rc=%s, imu=%s, rc4_yaw_invert=%s",
+                estimator_mode_.c_str(), rc_topic_.c_str(), imu_topic_.c_str(),
+                invert_rc_yaw_ ? "true" : "false");
   }
 
  private:
@@ -116,9 +130,46 @@ class FingerHomingController final : public rclcpp::Node {
 
   void on_odom(const nav_msgs::msg::Odometry &msg) {
     x_ = msg.pose.pose.position.x; y_ = msg.pose.pose.position.y;
-    yaw_ = yaw_from_quaternion(msg.pose.pose.orientation);
-    yaw_rate_ = msg.twist.twist.angular.z;
+    odom_yaw_ = yaw_from_quaternion(msg.pose.pose.orientation);
+    odom_yaw_rate_ = msg.twist.twist.angular.z;
     have_odom_ = true; last_odom_ = now();
+    align_imu_yaw_to_odom();
+  }
+  void on_imu(const sensor_msgs::msg::Imu &msg) {
+    const auto &q = msg.orientation;
+    const double norm_sq = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
+    if (!std::isfinite(norm_sq) || norm_sq < 1.0e-8) return;
+    imu_yaw_ = yaw_from_quaternion(q);
+    imu_yaw_rate_ = std::isfinite(msg.angular_velocity.z) ? msg.angular_velocity.z : 0.0;
+    have_imu_ = true; last_imu_ = now();
+    align_imu_yaw_to_odom();
+  }
+  void align_imu_yaw_to_odom() {
+    if (!have_imu_ || !have_odom_ || imu_yaw_aligned_) return;
+    // Positions in the phase regression are odometry-frame values.  IMU yaw
+    // may use a different global zero (or NED/ENU convention), so capture the
+    // constant offset once and then use live Pixhawk attitude for body-frame
+    // steering.
+    imu_to_odom_yaw_offset_ = wrap_pi(odom_yaw_ - imu_yaw_);
+    imu_yaw_aligned_ = true;
+  }
+  static double wrap_pi(double value) {
+    while (value > M_PI) value -= 2.0 * M_PI;
+    while (value < -M_PI) value += 2.0 * M_PI;
+    return value;
+  }
+  bool imu_yaw_fresh() {
+    return use_imu_yaw_ && have_imu_ && imu_yaw_aligned_ &&
+           (now() - last_imu_).seconds() <= imu_timeout_s_;
+  }
+  double body_yaw() {
+    return imu_yaw_fresh() ? wrap_pi(imu_yaw_ + imu_to_odom_yaw_offset_) : odom_yaw_;
+  }
+  double body_yaw_rate() {
+    return imu_yaw_fresh() ? imu_yaw_rate_ : odom_yaw_rate_;
+  }
+  const char *attitude_source() {
+    return imu_yaw_fresh() ? "mavros_imu_aligned" : "odometry_fallback";
   }
   void on_delta(double value) {
     if (!std::isfinite(value)) return;
@@ -260,10 +311,13 @@ class FingerHomingController final : public rclcpp::Node {
       transition(State::SUCCESS); publish_release(); publish_status(); return;
     }
     if (!direction_world_) { transition(State::PROBE); publish_neutral(); return; }
-    const double forward_axis = std::cos(yaw_) * direction_world_->x() + std::sin(yaw_) * direction_world_->y();
-    const double lateral_axis = -std::sin(yaw_) * direction_world_->x() + std::cos(yaw_) * direction_world_->y();
+    const double yaw_world_body = body_yaw();
+    const double forward_axis = std::cos(yaw_world_body) * direction_world_->x() +
+                                std::sin(yaw_world_body) * direction_world_->y();
+    const double lateral_axis = -std::sin(yaw_world_body) * direction_world_->x() +
+                                std::cos(yaw_world_body) * direction_world_->y();
     const double bearing = std::atan2(lateral_axis, forward_axis);
-    const double yaw = std::clamp(yaw_gain_ * bearing - yaw_rate_gain_ * yaw_rate_,
+    const double yaw = std::clamp(yaw_gain_ * bearing - yaw_rate_gain_ * body_yaw_rate(),
                                   -yaw_limit_, yaw_limit_);
     if (std::abs(bearing) > align_rad_) {
       transition_if_needed(State::ALIGN); publish_command(0.0, 0.0, yaw); publish_status(); return;
@@ -282,9 +336,7 @@ class FingerHomingController final : public rclcpp::Node {
     msg.channels.fill(mavros_msgs::msg::OverrideRCIn::CHAN_NOCHANGE);
     msg.channels.fill(1500);
     msg.channels[2] = 1500;  // ALT_HOLD owns heave; this package never commands Z.
-    // The vehicle contract maps positive RC yaw to positive body yaw.  The
-    // bearing above is already in the body convention, so do not mirror it.
-    msg.channels[3] = static_cast<uint16_t>(pwm(yaw, rc_span_));
+    msg.channels[3] = static_cast<uint16_t>(pwm(invert_rc_yaw_ ? -yaw : yaw, rc_span_));
     msg.channels[4] = static_cast<uint16_t>(pwm(forward, rc_span_));
     msg.channels[5] = static_cast<uint16_t>(pwm(lateral, rc_span_));
     last_forward_ = forward; last_lateral_ = lateral; last_yaw_ = yaw;
@@ -304,7 +356,9 @@ class FingerHomingController final : public rclcpp::Node {
          << (direction_world_ ? (*direction_world_).x() : 0.0) << ","
          << (direction_world_ ? (*direction_world_).y() : 0.0) << ",0],\"rc\":["
          << last_forward_ << "," << last_lateral_ << "," << last_yaw_ << "],\"dry_run\":"
-         << (dry_run_ ? "true" : "false") << "}";
+         << (dry_run_ ? "true" : "false") << ",\"attitude_source\":\""
+         << attitude_source() << "\",\"rc4_yaw_inverted\":"
+         << (invert_rc_yaw_ ? "true" : "false") << "}";
     std_msgs::msg::String msg; msg.data = json.str(); status_pub_->publish(msg);
     if (direction_world_) {
       geometry_msgs::msg::Vector3Stamped direction;
@@ -318,31 +372,35 @@ class FingerHomingController final : public rclcpp::Node {
       geometry_msgs::msg::Vector3Stamped gui_direction;
       gui_direction.header.stamp = direction.header.stamp;
       gui_direction.header.frame_id = "base_link";
-      gui_direction.vector.x = std::cos(yaw_) * direction_world_->x() +
-                               std::sin(yaw_) * direction_world_->y();
-      gui_direction.vector.y = -std::sin(yaw_) * direction_world_->x() +
-                               std::cos(yaw_) * direction_world_->y();
+      const double yaw_world_body = body_yaw();
+      gui_direction.vector.x = std::cos(yaw_world_body) * direction_world_->x() +
+                               std::sin(yaw_world_body) * direction_world_->y();
+      gui_direction.vector.y = -std::sin(yaw_world_body) * direction_world_->x() +
+                               std::cos(yaw_world_body) * direction_world_->y();
       gui_direction.vector.z = 0.0;
       gui_direction_pub_->publish(gui_direction);
       viewer_direction_pub_->publish(gui_direction);
     }
   }
 
-  std::string mode_, estimator_mode_, odom_topic_, rc_topic_, selected_topic_, required_mode_;
+  std::string mode_, estimator_mode_, odom_topic_, imu_topic_, rc_topic_, selected_topic_, required_mode_;
   double rc_span_{400.0}, probe_command_{0.2}, forward_command_{0.28}, lateral_command_{0.22};
   double probe_leg_s_{0.8}, probe_neutral_s_{0.3}, probe_settle_s_{0.5}, reprobe_s_{7.0};
   double success_range_m_{1.2}, range_constant_{0.325}, min_snr_db_{3.0};
   int min_samples_{16};
   double yaw_gain_{0.65}, yaw_rate_gain_{0.25}, yaw_limit_{0.30}, align_rad_{0.31}, max_runtime_s_{180.0};
-  bool auto_arm_{false}, auto_mode_{false}, dry_run_{false}, selected_{false}, armed_{false}, have_odom_{false};
-  double selected_hz_{0.0}, x_{0.0}, y_{0.0}, yaw_{0.0}, yaw_rate_{0.0}, cumulative_range_{0.0}, iq_{0.0}, last_snr_{0.0};
+  bool auto_arm_{false}, auto_mode_{false}, dry_run_{false}, invert_rc_yaw_{true}, selected_{false}, armed_{false}, have_odom_{false};
+  bool use_imu_yaw_{true}, have_imu_{false}, imu_yaw_aligned_{false};
+  double imu_timeout_s_{0.5};
+  double selected_hz_{0.0}, x_{0.0}, y_{0.0}, odom_yaw_{0.0}, odom_yaw_rate_{0.0}, imu_yaw_{0.0}, imu_yaw_rate_{0.0}, imu_to_odom_yaw_offset_{0.0}, cumulative_range_{0.0}, iq_{0.0}, last_snr_{0.0};
   double last_forward_{0.0}, last_lateral_{0.0}, last_yaw_{0.0};
   std::optional<Eigen::Vector2d> direction_world_;
   std::deque<Obs> obs_, snr_obs_;
   State state_{State::WAIT_FREQUENCY}; Time state_started_{}, active_started_{Clock::now()};
-  rclcpp::Time last_odom_{0, 0, RCL_ROS_TIME}, last_audio_{0, 0, RCL_ROS_TIME}, last_state_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time last_odom_{0, 0, RCL_ROS_TIME}, last_imu_{0, 0, RCL_ROS_TIME}, last_audio_{0, 0, RCL_ROS_TIME}, last_state_{0, 0, RCL_ROS_TIME};
   std::string vehicle_mode_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr frequency_sub_, delta_sub_, iq_sub_, snr_sub_;
   rclcpp::Publisher<mavros_msgs::msg::OverrideRCIn>::SharedPtr rc_pub_;

@@ -13,6 +13,7 @@ find_package(rclcpp REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(mavros_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
 add_executable(pinger_audio_estimator src/pinger_audio_estimator.cpp)
@@ -22,7 +23,7 @@ add_executable(pinger_frequency_selector src/pinger_frequency_selector.cpp)
 ament_target_dependencies(pinger_frequency_selector audio_common_msgs rclcpp std_msgs)
 
 add_executable(pinger_homing_2d_controller src/pinger_homing_2d_controller.cpp)
-ament_target_dependencies(pinger_homing_2d_controller geometry_msgs mavros_msgs nav_msgs rclcpp std_msgs)
+ament_target_dependencies(pinger_homing_2d_controller geometry_msgs mavros_msgs nav_msgs rclcpp sensor_msgs std_msgs)
 target_include_directories(pinger_homing_2d_controller PRIVATE ${EIGEN3_INCLUDE_DIRS})
 
 add_executable(rc_override_mux src/rc_override_mux.cpp)
