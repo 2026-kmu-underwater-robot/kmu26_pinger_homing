@@ -81,6 +81,11 @@ if(BUILD_TESTING)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_CURRENT_SOURCE_DIR}/test/test_no_odom_xy_depthless_runtime.py
       --controller $<TARGET_FILE:pinger_homing_controller>)
+  add_test(
+    NAME motion_response_runtime
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_CURRENT_SOURCE_DIR}/test/test_motion_response_runtime.py
+      --controller $<TARGET_FILE:pinger_homing_controller>)
   set_tests_properties(single_hydrophone_homing_math PROPERTIES TIMEOUT 30)
   set_tests_properties(pinger_homing_dry_run PROPERTIES TIMEOUT 15)
   set_tests_properties(pinger_homing_live_runtime PROPERTIES TIMEOUT 15)
@@ -89,6 +94,7 @@ if(BUILD_TESTING)
   set_tests_properties(pinger_hydrophone_repository_boundary PROPERTIES TIMEOUT 10)
   set_tests_properties(pinger_real_phase_launch_contract PROPERTIES TIMEOUT 10)
   set_tests_properties(no_odom_xy_depthless_runtime PROPERTIES TIMEOUT 10)
+  set_tests_properties(motion_response_runtime PROPERTIES TIMEOUT 10)
 endif()
 
 install(TARGETS

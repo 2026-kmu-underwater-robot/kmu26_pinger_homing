@@ -20,6 +20,9 @@ def test_real_launch_uses_canonical_cpp_no_odom_phase_controller() -> None:
     assert '"acoustic_estimator_mode": "phase"' in launch
     assert '"no_odom_horizontal_only": True' in launch
     assert '"no_odom_vertical_control_enabled": False' in launch
+    assert '"motion_response_enabled"' in launch
+    assert '"motion_response_velocity_topic"' in launch
+    assert '"motion_response_min_speed_mps"' in launch
 
 
 def test_real_launch_preserves_external_hydrophone_estimator_boundary() -> None:
@@ -46,4 +49,22 @@ def test_interactive_launch_scans_then_injects_selected_startup_frequency() -> N
     assert 'launch_arguments["use_audio_capture"] = "false"' in launch
     assert 'gui_rc_handoff' in launch
     assert 'OnShutdown' in launch
+    assert '"motion_response_enabled"' in launch
     assert not (ROOT / "scripts" / "start_pinger_homing_real.sh").exists()
+
+
+def test_motion_response_adapts_timing_without_becoming_phase_bearing_input() -> None:
+    controller = (ROOT / "src" / "pinger_homing" / "pinger_homing_controller.cpp").read_text()
+    assert "handle_no_odom_motion_response" in controller
+    assert "motion_response_velocity_topic" in controller
+    assert "no_odom_probe_leg_extensions_s_" in controller
+    assert "uses_for_bearing\\\":false" in controller
+    assert "never enter the Phase ABBA regression" in controller
+
+
+if __name__ == "__main__":
+    test_real_launch_uses_canonical_cpp_no_odom_phase_controller()
+    test_real_launch_preserves_external_hydrophone_estimator_boundary()
+    test_xy_alt_hold_does_not_require_depth_for_a_heave_free_probe()
+    test_interactive_launch_scans_then_injects_selected_startup_frequency()
+    test_motion_response_adapts_timing_without_becoming_phase_bearing_input()

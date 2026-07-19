@@ -62,6 +62,54 @@ def generate_launch_description() -> LaunchDescription:
         ),
         DeclareLaunchArgument("reference_frequency_hz", default_value="21164.0"),
         DeclareLaunchArgument("odometry_topic", default_value="/odometry/filtered"),
+        DeclareLaunchArgument(
+            "motion_response_enabled",
+            default_value="true",
+            description=(
+                "Use only fresh odometry twist XY magnitude to adapt Phase leg timing; "
+                "it never participates in Phase bearing estimation."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "motion_response_velocity_topic",
+            default_value="/odometry/filtered",
+            description="Twist feedback topic for the optional Phase timing adaptation.",
+        ),
+        DeclareLaunchArgument(
+            "motion_response_min_command",
+            default_value="0.05",
+            description="Minimum normalized XY command which enables motion-response adaptation.",
+        ),
+        DeclareLaunchArgument(
+            "motion_response_min_speed_mps",
+            default_value="0.03",
+            description="XY speed needed before a commanded Phase leg is sampled.",
+        ),
+        DeclareLaunchArgument(
+            "motion_response_probe_extension_s",
+            default_value="0.30",
+            description="Extra duration added to a slow Phase leg at each adaptation step.",
+        ),
+        DeclareLaunchArgument(
+            "motion_response_probe_max_extension_s",
+            default_value="1.20",
+            description="Maximum additional duration for each Phase leg with low XY response.",
+        ),
+        DeclareLaunchArgument(
+            "motion_response_approach_grace_s",
+            default_value="0.80",
+            description="Forward-command spool-up time before triggering an adaptive re-estimate.",
+        ),
+        DeclareLaunchArgument(
+            "motion_response_approach_hold_s",
+            default_value="0.80",
+            description="Continuous low-speed time that returns forward motion to a new ABBA estimate.",
+        ),
+        DeclareLaunchArgument(
+            "motion_response_feedback_timeout_s",
+            default_value="0.75",
+            description="Old velocity feedback keeps the validated fixed Phase timing.",
+        ),
         DeclareLaunchArgument("imu_topic", default_value="/mavros/imu/data"),
         DeclareLaunchArgument("depth_topic", default_value="/depth/pose"),
         DeclareLaunchArgument("state_topic", default_value="/mavros/state"),
@@ -190,6 +238,31 @@ def generate_launch_description() -> LaunchDescription:
             "auto_mode": ParameterValue(LaunchConfiguration("auto_mode"), value_type=bool),
             "mode": LaunchConfiguration("mode"),
             "odometry_topic": odometry_topic,
+            "motion_response_enabled": ParameterValue(
+                LaunchConfiguration("motion_response_enabled"), value_type=bool
+            ),
+            "motion_response_velocity_topic": LaunchConfiguration("motion_response_velocity_topic"),
+            "motion_response_min_command": ParameterValue(
+                LaunchConfiguration("motion_response_min_command"), value_type=float
+            ),
+            "motion_response_min_speed_mps": ParameterValue(
+                LaunchConfiguration("motion_response_min_speed_mps"), value_type=float
+            ),
+            "motion_response_probe_extension_s": ParameterValue(
+                LaunchConfiguration("motion_response_probe_extension_s"), value_type=float
+            ),
+            "motion_response_probe_max_extension_s": ParameterValue(
+                LaunchConfiguration("motion_response_probe_max_extension_s"), value_type=float
+            ),
+            "motion_response_approach_grace_s": ParameterValue(
+                LaunchConfiguration("motion_response_approach_grace_s"), value_type=float
+            ),
+            "motion_response_approach_hold_s": ParameterValue(
+                LaunchConfiguration("motion_response_approach_hold_s"), value_type=float
+            ),
+            "motion_response_feedback_timeout_s": ParameterValue(
+                LaunchConfiguration("motion_response_feedback_timeout_s"), value_type=float
+            ),
             "imu_topic": imu_topic,
             "depth_pose_topic": depth_topic,
             "vehicle_state_topic": state_topic,

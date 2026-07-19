@@ -159,6 +159,14 @@ class PingerHomingController : public rclcpp::Node {
         declare_parameter<std::string>("odom_topic", "/odometry/filtered");
     odometry_topic_ = declare_parameter<std::string>(
         "odometry_topic", legacy_odom_topic);
+    // This is deliberately separate from the optional localization input.
+    // In no_odom_phase it consumes *only* twist.x/twist.y magnitude to adapt
+    // the Phase leg timing. Pose, velocity direction, and this timestamp
+    // never enter the Phase ABBA regression or the bearing controller.
+    motion_response_enabled_ = declare_parameter<bool>(
+        "motion_response_enabled", false);
+    motion_response_velocity_topic_ = declare_parameter<std::string>(
+        "motion_response_velocity_topic", odometry_topic_);
     imu_topic_ = declare_parameter<std::string>("imu_topic", "/mavros/imu/data");
     depth_pose_topic_ = declare_parameter<std::string>("depth_pose_topic", "/depth/pose");
     const auto legacy_state_topic =
@@ -309,6 +317,24 @@ class PingerHomingController : public rclcpp::Node {
         "no_odom_horizontal_only", false);
     no_odom_heave_limit_ = clamp(
         declare_parameter<double>("no_odom_heave_limit", 0.18), 0.0, 0.30);
+    // Requested RC magnitude is not a speed setpoint.  Fresh velocity only
+    // decides when a commanded Phase leg has moved enough to be sampled. A
+    // slow leg is extended (not discarded), and a blocked forward segment
+    // returns to a neutral ABBA re-estimate instead of declaring failure.
+    motion_response_min_command_ = clamp(
+        declare_parameter<double>("motion_response_min_command", 0.05), 0.01, 0.80);
+    motion_response_min_speed_mps_ = clamp(
+        declare_parameter<double>("motion_response_min_speed_mps", 0.03), 0.001, 1.0);
+    motion_response_probe_extension_s_ = clamp(
+        declare_parameter<double>("motion_response_probe_extension_s", 0.30), 0.05, 2.0);
+    motion_response_probe_max_extension_s_ = clamp(
+        declare_parameter<double>("motion_response_probe_max_extension_s", 1.20), 0.0, 6.0);
+    motion_response_approach_grace_s_ = clamp(
+        declare_parameter<double>("motion_response_approach_grace_s", 0.80), 0.0, 5.0);
+    motion_response_approach_hold_s_ = clamp(
+        declare_parameter<double>("motion_response_approach_hold_s", 0.80), 0.10, 10.0);
+    motion_response_feedback_timeout_s_ = clamp(
+        declare_parameter<double>("motion_response_feedback_timeout_s", 0.75), 0.10, 5.0);
     require_source_lock_ = declare_parameter<bool>(
         "require_source_lock", legacy_python_sequence_);
     prefer_direction_control_ = declare_parameter<bool>(
@@ -602,6 +628,12 @@ class PingerHomingController : public rclcpp::Node {
       odometry_sub_ = create_subscription<nav_msgs::msg::Odometry>(
           odometry_topic_, sensor_qos,
           [this](const nav_msgs::msg::Odometry::SharedPtr msg) { on_odometry(*msg); });
+    } else if (motion_response_enabled_ && !motion_response_velocity_topic_.empty()) {
+      motion_response_velocity_sub_ = create_subscription<nav_msgs::msg::Odometry>(
+          motion_response_velocity_topic_, sensor_qos,
+          [this](const nav_msgs::msg::Odometry::SharedPtr msg) {
+            on_motion_response_velocity(*msg);
+          });
     }
     imu_sub_ = create_subscription<sensor_msgs::msg::Imu>(
         imu_topic_, sensor_qos,
@@ -650,12 +682,13 @@ class PingerHomingController : public rclcpp::Node {
         get_logger(),
         "C++ pinger homing ready mode=%s dry_run=%s odom=%s imu=%s depth=%s "
         "audio=%s,%s direction=%s rc=%s tank_depth=%.3fm max_vehicle_depth=%.3fm "
-        "legacy_python_sequence=%s navigation_mode=%s",
+        "legacy_python_sequence=%s navigation_mode=%s motion_response=%s velocity=%s",
         controller_mode_.c_str(), dry_run_ ? "true" : "false", odometry_topic_.c_str(),
         imu_topic_.c_str(), depth_pose_topic_.c_str(), delta_range_topic_.c_str(),
         iq_magnitude_topic_.c_str(), direction_topic_.c_str(), rc_output_topic_.c_str(),
         tank_max_depth_m_, max_vehicle_depth_m_, legacy_python_sequence_ ? "true" : "false",
-        navigation_mode_.c_str());
+        navigation_mode_.c_str(), motion_response_enabled_ ? "true" : "false",
+        motion_response_velocity_topic_.c_str());
   }
 
   ~PingerHomingController() override {
@@ -679,6 +712,18 @@ class PingerHomingController : public rclcpp::Node {
     yaw_rate_rad_s_ = std::isfinite(msg.twist.twist.angular.z)
         ? msg.twist.twist.angular.z : 0.0;
     last_odometry_ = SteadyClock::now();
+    on_motion_response_velocity(msg);
+  }
+
+  void on_motion_response_velocity(const nav_msgs::msg::Odometry &msg) {
+    const double vx = msg.twist.twist.linear.x;
+    const double vy = msg.twist.twist.linear.y;
+    if (!std::isfinite(vx) || !std::isfinite(vy)) return;
+    // The frame of twist may be body or odom, but the XY norm is invariant to
+    // yaw.  Z is intentionally excluded because ALT_HOLD/depth settling is
+    // not evidence of horizontal collision or progress.
+    motion_response_horizontal_speed_mps_ = std::hypot(vx, vy);
+    last_motion_response_velocity_ = SteadyClock::now();
   }
 
   void on_imu(const sensor_msgs::msg::Imu &msg) {
@@ -830,8 +875,9 @@ class PingerHomingController : public rclcpp::Node {
     // Explicit no-odometry Phase navigation is intentionally isolated from
     // the metric source-fit path below.  It consumes only coherent Phase
     // delta-range samples during known body-axis RC legs, IMU attitude/rate,
-    // Bar30 depth and MAVROS state.  Even if /odometry/filtered appears later,
-    // it cannot affect this mode because the subscription is not created.
+    // Bar30 depth and MAVROS state. A separately subscribed odometry twist
+    // may only adapt probe timing/re-estimation; position and velocity never
+    // affect this mode's Phase regression or bearing.
     if (navigation_mode_ == "no_odom_phase") {
       no_odom_phase_tick(now);
       return;
@@ -958,6 +1004,79 @@ class PingerHomingController : public rclcpp::Node {
            current_position_z(now).has_value();
   }
 
+  bool motion_response_feedback_fresh(const SteadyTime &now) const {
+    return motion_response_horizontal_speed_mps_.has_value() &&
+        last_motion_response_velocity_ != SteadyTime{} &&
+        seconds_since(last_motion_response_velocity_, now) < motion_response_feedback_timeout_s_;
+  }
+
+  bool motion_response_moving(const SteadyTime &now) const {
+    return !motion_response_enabled_ || !motion_response_feedback_fresh(now) ||
+        *motion_response_horizontal_speed_mps_ >= motion_response_min_speed_mps_;
+  }
+
+  void reset_motion_response() {
+    motion_response_command_started_.reset();
+    motion_response_low_speed_started_.reset();
+  }
+
+  bool handle_no_odom_motion_response(
+      const SteadyTime &now, const Command &requested) {
+    const double requested_xy = std::hypot(requested.forward, requested.lateral);
+    motion_response_requested_xy_ = requested_xy;
+    if (!motion_response_enabled_ || state_ != "APPROACH" ||
+        requested_xy < motion_response_min_command_ ||
+        !motion_response_feedback_fresh(now)) {
+      reset_motion_response();
+      return false;
+    }
+
+    if (!motion_response_command_started_) {
+      motion_response_command_started_ = now;
+      motion_response_low_speed_started_.reset();
+      return false;
+    }
+    if (seconds_since(*motion_response_command_started_, now) <
+        motion_response_approach_grace_s_) {
+      return false;
+    }
+    if (motion_response_moving(now)) {
+      // Measured horizontal motion recovered.  Start a new low-speed window
+      // only if the vehicle becomes stuck again; do not accumulate separated
+      // brief slowdowns such as a yaw correction.
+      motion_response_low_speed_started_.reset();
+      return false;
+    }
+    if (!motion_response_low_speed_started_) {
+      motion_response_low_speed_started_ = now;
+      return false;
+    }
+    if (seconds_since(*motion_response_low_speed_started_, now) <
+        motion_response_approach_hold_s_) {
+      return false;
+    }
+
+    ++motion_response_reestimate_count_;
+    const double low_speed_for_s =
+        seconds_since(*motion_response_low_speed_started_, now);
+    const double measured_speed_mps = *motion_response_horizontal_speed_mps_;
+    // A blocked forward segment is not a mission failure. Neutral first and
+    // repeat the complete ABBA sequence from the current physical position;
+    // the refreshed Phase slope can select a different yaw/approach direction.
+    // start_no_odom_probe() adds its own neutral settle interval before any
+    // new excitation, so no command is carried into the obstacle.
+    publish_command(Command{});
+    reset_motion_response();
+    RCLCPP_WARN(
+        get_logger(),
+        "motion response low: requested XY=%.3f, feedback=%.4f m/s for %.2fs; "
+        "neutral then adaptive Phase re-estimate #%d",
+        requested_xy, measured_speed_mps, low_speed_for_s,
+        motion_response_reestimate_count_);
+    start_no_odom_probe(now);
+    return true;
+  }
+
   Command no_odom_probe_command(double elapsed_s, bool &complete) {
     complete = false;
     no_odom_probe_axis_ = 0;
@@ -972,11 +1091,19 @@ class PingerHomingController : public rclcpp::Node {
     const std::vector<int> axes = no_odom_horizontal_only_
         ? std::vector<int>{1, -1, -1, 1, 2, -2, -2, 2}
         : std::vector<int>{1, -1, -1, 1, 2, -2, -2, 2, 3, -3, -3, 3};
-    for (const int axis : axes) {
-      if (remaining < no_odom_probe_leg_s_) {
+    for (std::size_t leg_index = 0; leg_index < axes.size(); ++leg_index) {
+      const int axis = axes[leg_index];
+      const double leg_duration = no_odom_probe_leg_s_ +
+          no_odom_probe_leg_extensions_s_[leg_index];
+      if (remaining < leg_duration) {
         no_odom_probe_axis_ = axis;
+        no_odom_probe_active_leg_index_ = static_cast<int>(leg_index);
+        no_odom_probe_active_leg_extension_s_ = no_odom_probe_leg_extensions_s_[leg_index];
+        // Do not record a range slope while the requested leg has not yet
+        // produced physical XY movement. The leg remains active so it can
+        // become observable without relabeling the sample as another axis.
         no_odom_probe_sample_enabled_ =
-            remaining >= no_odom_probe_sample_delay_s_;
+            remaining >= no_odom_probe_sample_delay_s_ && motion_response_moving(SteadyClock::now());
         if (axis == 1) return {no_odom_probe_scale_, 0.0, 0.0, 0.0};
         if (axis == -1) return {-no_odom_probe_scale_, 0.0, 0.0, 0.0};
         if (axis == 2) return {0.0, no_odom_probe_scale_, 0.0, 0.0};
@@ -984,7 +1111,36 @@ class PingerHomingController : public rclcpp::Node {
         if (axis == 3) return {0.0, 0.0, no_odom_probe_heave_scale_, 0.0};
         return {0.0, 0.0, -no_odom_probe_heave_scale_, 0.0};
       }
-      remaining -= no_odom_probe_leg_s_;
+      // Feedback says that the commanded leg stayed nearly stationary. Give
+      // the current body axis more time instead of advancing to a nominally
+      // different probe direction with no usable displacement. Stale/missing
+      // feedback keeps the original validated wall-clock timing.
+      if (motion_response_enabled_ && motion_response_feedback_fresh(SteadyClock::now()) &&
+          !motion_response_moving(SteadyClock::now()) &&
+          no_odom_probe_leg_extensions_s_[leg_index] <
+              motion_response_probe_max_extension_s_) {
+        const double extension = std::min(
+            motion_response_probe_extension_s_,
+            motion_response_probe_max_extension_s_ -
+                no_odom_probe_leg_extensions_s_[leg_index]);
+        no_odom_probe_leg_extensions_s_[leg_index] += extension;
+        no_odom_probe_axis_ = axis;
+        no_odom_probe_active_leg_index_ = static_cast<int>(leg_index);
+        no_odom_probe_active_leg_extension_s_ = no_odom_probe_leg_extensions_s_[leg_index];
+        no_odom_probe_sample_enabled_ = false;
+        RCLCPP_DEBUG(
+            get_logger(),
+            "Phase probe leg %zu axis=%d has %.4f m/s XY response; extending %.2fs (total %.2fs)",
+            leg_index, axis, *motion_response_horizontal_speed_mps_, extension,
+            no_odom_probe_active_leg_extension_s_);
+        if (axis == 1) return {no_odom_probe_scale_, 0.0, 0.0, 0.0};
+        if (axis == -1) return {-no_odom_probe_scale_, 0.0, 0.0, 0.0};
+        if (axis == 2) return {0.0, no_odom_probe_scale_, 0.0, 0.0};
+        if (axis == -2) return {0.0, -no_odom_probe_scale_, 0.0, 0.0};
+        if (axis == 3) return {0.0, 0.0, no_odom_probe_heave_scale_, 0.0};
+        return {0.0, 0.0, -no_odom_probe_heave_scale_, 0.0};
+      }
+      remaining -= leg_duration;
       if (remaining < no_odom_probe_neutral_s_) {
         // The tail of each neutral gap supplies u=0 observations for the
         // robust clock/current drift fit.  Its initial momentum-decay portion
@@ -1009,8 +1165,12 @@ class PingerHomingController : public rclcpp::Node {
     no_odom_probe_fit_rms_m_ = std::numeric_limits<double>::infinity();
     no_odom_probe_fit_inlier_ratio_ = 0.0;
     no_odom_probe_axis_ = 0;
+    no_odom_probe_active_leg_index_ = -1;
+    no_odom_probe_active_leg_extension_s_ = 0.0;
+    no_odom_probe_leg_extensions_s_.fill(0.0);
     no_odom_probe_sample_enabled_ = false;
     no_odom_forward_started_.reset();
+    reset_motion_response();
     filtered_direction_body_.reset();
     probe_completed_ = false;
     if (state_ == "NO_ODOM_PHASE_PROBE") {
@@ -1244,6 +1404,7 @@ class PingerHomingController : public rclcpp::Node {
       no_odom_initial_confirmation_dot_ =
           std::numeric_limits<double>::quiet_NaN();
       no_odom_initial_bearing_confirmed_ = false;
+      reset_motion_response();
       transition("WAIT_VEHICLE");
       publish_command(Command{});
       return;
@@ -1317,7 +1478,9 @@ class PingerHomingController : public rclcpp::Node {
       transition("APPROACH");
       forward = std::min(forward_max_, no_odom_forward_command_);
     }
-    publish_command(Command{forward, 0.0, heave, yaw});
+    const Command approach_command{forward, 0.0, heave, yaw};
+    if (handle_no_odom_motion_response(now, approach_command)) return;
+    publish_command(approach_command);
   }
 
   void direct_direction_tick(const SteadyTime &now) {
@@ -2650,6 +2813,13 @@ class PingerHomingController : public rclcpp::Node {
         ? std::optional<double>(seconds_since(last_acoustic_position_fit_, now))
         : std::nullopt;
     const bool output_active = !dry_run_ && live_ready;
+    const bool motion_response_feedback_is_fresh = motion_response_feedback_fresh(now);
+    const std::optional<double> motion_response_speed = motion_response_feedback_is_fresh
+        ? motion_response_horizontal_speed_mps_ : std::nullopt;
+    const std::optional<double> motion_response_low_speed_elapsed =
+        motion_response_low_speed_started_
+            ? std::optional<double>(seconds_since(*motion_response_low_speed_started_, now))
+            : std::nullopt;
     std_msgs::msg::String msg;
     std::ostringstream out;
     out << std::fixed << std::setprecision(4)
@@ -2788,6 +2958,24 @@ class PingerHomingController : public rclcpp::Node {
         << ",\"terminal_brake_duration_s\":" << no_odom_terminal_brake_duration_s_
         << ",\"terminal_brake_entry_forward\":" << terminal_brake_entry_forward_
         << "}"
+        << ",\"motion_response\":{\"enabled\":"
+        << bool_text(motion_response_enabled_)
+        << ",\"uses_for_bearing\":false"
+        << ",\"role\":\"probe_timing_and_reestimate\""
+        << ",\"velocity_topic\":\"" << motion_response_velocity_topic_ << "\""
+        << ",\"feedback_fresh\":" << bool_text(motion_response_feedback_is_fresh)
+        << ",\"feedback_age_s\":"
+        << seconds_since(last_motion_response_velocity_, now)
+        << ",\"horizontal_speed_mps\":" << json_number(motion_response_speed)
+        << ",\"requested_xy\":" << motion_response_requested_xy_
+        << ",\"min_command\":" << motion_response_min_command_
+        << ",\"min_speed_mps\":" << motion_response_min_speed_mps_
+        << ",\"probe_extension_s\":" << no_odom_probe_active_leg_extension_s_
+        << ",\"probe_max_extension_s\":" << motion_response_probe_max_extension_s_
+        << ",\"approach_grace_s\":" << motion_response_approach_grace_s_
+        << ",\"approach_hold_s\":" << motion_response_approach_hold_s_
+        << ",\"low_speed_elapsed_s\":" << json_number(motion_response_low_speed_elapsed)
+        << ",\"reestimate_count\":" << motion_response_reestimate_count_ << "}"
         << ",\"range_feedback\":{\"enabled\":" << bool_text(range_gradient_enabled_)
         << ",\"continuous_excitation\":"
         << bool_text(continuous_range_excitation_enabled_)
@@ -2864,6 +3052,7 @@ class PingerHomingController : public rclcpp::Node {
   std::string direction_topic_;
   std::string direction_frame_;
   std::string odometry_topic_;
+  std::string motion_response_velocity_topic_;
   std::string imu_topic_;
   std::string depth_pose_topic_;
   std::string vehicle_state_topic_;
@@ -2929,6 +3118,14 @@ class PingerHomingController : public rclcpp::Node {
   bool no_odom_vertical_control_enabled_{true};
   bool no_odom_horizontal_only_{false};
   double no_odom_heave_limit_{0.18};
+  bool motion_response_enabled_{false};
+  double motion_response_min_command_{0.05};
+  double motion_response_min_speed_mps_{0.03};
+  double motion_response_probe_extension_s_{0.30};
+  double motion_response_probe_max_extension_s_{1.20};
+  double motion_response_approach_grace_s_{0.80};
+  double motion_response_approach_hold_s_{0.80};
+  double motion_response_feedback_timeout_s_{0.75};
   bool require_source_lock_{false};
   bool prefer_direction_control_{false};
   bool phase_yaw_guidance_enabled_{true};
@@ -3032,6 +3229,7 @@ class PingerHomingController : public rclcpp::Node {
   SteadyTime last_connected_{};
   SteadyTime last_armed_{};
   SteadyTime last_odometry_{};
+  SteadyTime last_motion_response_velocity_{};
   SteadyTime last_imu_{};
   SteadyTime last_depth_pose_{};
   SteadyTime last_audio_{};
@@ -3050,6 +3248,9 @@ class PingerHomingController : public rclcpp::Node {
   double no_odom_probe_fit_rms_m_{std::numeric_limits<double>::infinity()};
   double no_odom_probe_fit_inlier_ratio_{0.0};
   int no_odom_probe_axis_{0};
+  int no_odom_probe_active_leg_index_{-1};
+  std::array<double, 12> no_odom_probe_leg_extensions_s_{};
+  double no_odom_probe_active_leg_extension_s_{0.0};
   bool no_odom_probe_sample_enabled_{false};
   std::size_t no_odom_probe_count_{0U};
   std::optional<Eigen::Vector3d> no_odom_initial_candidate_world_;
@@ -3058,6 +3259,11 @@ class PingerHomingController : public rclcpp::Node {
       std::numeric_limits<double>::quiet_NaN()};
   bool no_odom_initial_bearing_confirmed_{false};
   std::optional<SteadyTime> no_odom_forward_started_;
+  std::optional<double> motion_response_horizontal_speed_mps_;
+  std::optional<SteadyTime> motion_response_command_started_;
+  std::optional<SteadyTime> motion_response_low_speed_started_;
+  double motion_response_requested_xy_{0.0};
+  int motion_response_reestimate_count_{0};
   std::optional<Eigen::Vector3d> phase_bearing_lock_world_;
   std::size_t direction_update_count_{0U};
   std::optional<Eigen::Vector3d> filtered_direction_body_;
@@ -3120,6 +3326,7 @@ class PingerHomingController : public rclcpp::Node {
   double last_bearing_rad_{0.0};
 
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odometry_sub_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr motion_response_velocity_sub_;
   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr
       depth_pose_sub_;

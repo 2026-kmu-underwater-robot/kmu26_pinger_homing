@@ -24,6 +24,19 @@ MAVROS IMU yaw, moves forward briefly, then probes again.  It deliberately
 does not feed `/odometry/filtered` or any simulator ground truth into Phase
 control.  ALT_HOLD owns vertical control.
 
+The real and test-tank launches enable `motion_response` as a separate
+timing path. It reads **only the XY speed magnitude** from
+`/odometry/filtered`, never pose or velocity direction. If a Phase ABBA leg
+has not reached `0.03 m/s`, that same leg is extended in `0.30 s` increments
+(up to `1.20 s`) and produces no Phase sample until it actually moves. If a
+forward segment stays slow after its grace/hold periods, it commands neutral
+and repeats the ABBA estimate from the current physical location; it does
+**not** enter a failure state. The refreshed Phase result then re-aligns yaw
+and can choose a different next approach direction. Missing/stale feedback
+reports `feedback_fresh=false` in `/pinger_homing/status` and retains the
+validated fixed timing. It is a timing/adaptation input, never a
+Phase-bearing input.
+
 ## Topic boundary
 
 Inputs from the forked hydrophone package:
@@ -74,3 +87,17 @@ approach demand around 1500; these are launch parameters, not hidden code
 constants.  The amplitude range relation `(K / iq_magnitude)^2` still requires
 a measured physical calibration, so the default `K=0` disables metric-range
 completion.  The simulator-only `0.325` must not be used on the vehicle.
+
+Motion-response defaults are exposed as launch parameters:
+
+```bash
+motion_response_min_speed_mps:=0.03 \
+motion_response_probe_extension_s:=0.30 \
+motion_response_probe_max_extension_s:=1.20 \
+motion_response_approach_grace_s:=0.80 \
+motion_response_approach_hold_s:=0.80
+```
+
+For a slower vehicle, increase `motion_response_probe_max_extension_s` before
+lowering the speed threshold. Set `motion_response_enabled:=false` only for a
+comparison/commissioning run that has no usable twist feedback.

@@ -31,6 +31,15 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("success_hold_s", default_value="0.8"),
         DeclareLaunchArgument("amplitude_range_constant", default_value="0.325"),
         DeclareLaunchArgument("max_runtime_s", default_value="180.0"),
+        DeclareLaunchArgument("motion_response_enabled", default_value="true"),
+        DeclareLaunchArgument("motion_response_velocity_topic", default_value="/odometry/filtered"),
+        DeclareLaunchArgument("motion_response_min_command", default_value="0.05"),
+        DeclareLaunchArgument("motion_response_min_speed_mps", default_value="0.03"),
+        DeclareLaunchArgument("motion_response_probe_extension_s", default_value="0.30"),
+        DeclareLaunchArgument("motion_response_probe_max_extension_s", default_value="1.20"),
+        DeclareLaunchArgument("motion_response_approach_grace_s", default_value="0.80"),
+        DeclareLaunchArgument("motion_response_approach_hold_s", default_value="0.80"),
+        DeclareLaunchArgument("motion_response_feedback_timeout_s", default_value="0.75"),
         DeclareLaunchArgument("rc_pwm_span", default_value="400.0"),
         DeclareLaunchArgument("probe_pwm_delta", default_value="90"),
         DeclareLaunchArgument("approach_pwm_delta", default_value="120"),
@@ -86,6 +95,26 @@ def generate_launch_description() -> LaunchDescription:
                 "auto_arm": ParameterValue(LaunchConfiguration("auto_arm"), value_type=bool),
                 "auto_mode": ParameterValue(LaunchConfiguration("auto_mode"), value_type=bool),
                 "imu_topic": LaunchConfiguration("imu_topic"),
+                # Only odometry twist XY magnitude is subscribed for the
+                # optional motion-response timing adaptation. It is never
+                # passed to the Phase fit or used as vehicle pose/bearing.
+                "motion_response_enabled": ParameterValue(
+                    LaunchConfiguration("motion_response_enabled"), value_type=bool),
+                "motion_response_velocity_topic": LaunchConfiguration("motion_response_velocity_topic"),
+                "motion_response_min_command": ParameterValue(
+                    LaunchConfiguration("motion_response_min_command"), value_type=float),
+                "motion_response_min_speed_mps": ParameterValue(
+                    LaunchConfiguration("motion_response_min_speed_mps"), value_type=float),
+                "motion_response_probe_extension_s": ParameterValue(
+                    LaunchConfiguration("motion_response_probe_extension_s"), value_type=float),
+                "motion_response_probe_max_extension_s": ParameterValue(
+                    LaunchConfiguration("motion_response_probe_max_extension_s"), value_type=float),
+                "motion_response_approach_grace_s": ParameterValue(
+                    LaunchConfiguration("motion_response_approach_grace_s"), value_type=float),
+                "motion_response_approach_hold_s": ParameterValue(
+                    LaunchConfiguration("motion_response_approach_hold_s"), value_type=float),
+                "motion_response_feedback_timeout_s": ParameterValue(
+                    LaunchConfiguration("motion_response_feedback_timeout_s"), value_type=float),
                 "depth_pose_topic": LaunchConfiguration("depth_topic"),
                 "vehicle_state_topic": LaunchConfiguration("state_topic"),
                 "delta_range_topic": "/pinger_homing/delta_range_m",
