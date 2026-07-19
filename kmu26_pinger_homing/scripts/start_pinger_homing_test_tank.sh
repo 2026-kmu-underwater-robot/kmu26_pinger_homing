@@ -21,7 +21,8 @@ if ! timeout 30 ros2 topic echo --once /pinger_homing/frequency_candidates; then
 fi
 
 while true; do
-  read -r -p "Select candidate number (1-5) or frequency in Hz: " selection
+  printf '\n\n[Pinger] Candidates are ready. Enter 1-5 or a frequency in Hz, then press Enter:\n' >&2
+  read -r selection
   if [[ "${selection}" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
     ros2 topic pub --once /pinger_homing/manual_selection std_msgs/msg/String \
       "{data: '${selection}'}"
