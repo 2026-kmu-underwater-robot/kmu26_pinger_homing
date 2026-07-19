@@ -142,7 +142,10 @@ def _restore_gui_rc_on_shutdown(context, *args, **kwargs):
     import rclpy
     from std_srvs.srv import Trigger
 
-    service_name = LaunchConfiguration("gui_rc_handoff_service").perform(context)
+    # This is intentionally a different service from the launch-time handoff.
+    # Reusing ``.../suspend_rc_override`` here stranded the web GUI without an
+    # RC publisher after a terminal-launched pinger run exited.
+    service_name = LaunchConfiguration("gui_rc_restore_service").perform(context)
     rclpy.init(args=None)
     gate = rclpy.create_node("pinger_frequency_launch_restore")
     try:
@@ -364,6 +367,14 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             "gui_rc_handoff_service",
             default_value="/uuv_web_control_gui/suspend_rc_override",
+        ),
+        DeclareLaunchArgument(
+            "gui_rc_restore_service",
+            default_value="/uuv_web_control_gui/restore_rc_override",
+            description=(
+                "Optional GUI service called on launch shutdown to restore its "
+                "manual RC publisher after the exclusive pinger mux exits."
+            ),
         ),
     ]
 

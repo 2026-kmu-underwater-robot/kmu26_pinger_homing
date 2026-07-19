@@ -48,6 +48,15 @@ def test_interactive_launch_scans_then_injects_selected_startup_frequency() -> N
     assert 'launch_arguments["reference_frequency_hz"]' in launch
     assert 'launch_arguments["use_audio_capture"] = "false"' in launch
     assert 'gui_rc_handoff' in launch
+    assert 'gui_rc_handoff_service' in launch
+    assert 'gui_rc_restore_service' in launch
+    assert 'default_value="/uuv_web_control_gui/suspend_rc_override"' in launch
+    assert 'default_value="/uuv_web_control_gui/restore_rc_override"' in launch
+    restore_body = launch.split("def _restore_gui_rc_on_shutdown", 1)[1].split(
+        "def _start_real_homing_after_selection", 1
+    )[0]
+    assert 'LaunchConfiguration("gui_rc_restore_service")' in restore_body
+    assert 'LaunchConfiguration("gui_rc_handoff_service")' not in restore_body
     assert 'OnShutdown' in launch
     assert '"motion_response_enabled"' in launch
     assert not (ROOT / "scripts" / "start_pinger_homing_real.sh").exists()
