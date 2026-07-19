@@ -26,9 +26,11 @@ from launch.actions import (
     IncludeLaunchDescription,
     LogInfo,
     OpaqueFunction,
+    RegisterEventHandler,
     TimerAction,
 )
 from launch.conditions import IfCondition
+from launch.event_handlers import OnShutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -47,6 +49,8 @@ _REAL_ARGUMENTS = (
     "audio_channels",
     "audio_sample_rate",
     "audio_sample_format",
+    "audio_input_latency_s",
+    "use_sim_time",
     "odometry_topic",
     "imu_topic",
     "depth_topic",
@@ -83,6 +87,68 @@ _REAL_ARGUMENTS = (
     "approach_duration_s",
     "initial_confirmation_probes",
 )
+
+
+def _gui_handoff_requested(context) -> bool:
+    mode = LaunchConfiguration("gui_rc_handoff").perform(context).strip().lower()
+    if mode in {"false", "0", "off", "no"}:
+        return False
+    if mode in {"true", "1", "on", "yes", "auto"}:
+        return True
+    raise RuntimeError("gui_rc_handoff must be auto, true, or false")
+
+
+def _handoff_gui_rc_if_available(gate, context) -> None:
+    """Release the optional simulator GUI publisher before the mux starts."""
+    if not _gui_handoff_requested(context):
+        return
+    from std_srvs.srv import Trigger
+
+    service_name = LaunchConfiguration("gui_rc_handoff_service").perform(context)
+    client = gate.create_client(Trigger, service_name)
+    service_ready = client.wait_for_service(timeout_sec=0.75)
+    requested_mode = LaunchConfiguration("gui_rc_handoff").perform(context).strip().lower()
+    if not service_ready:
+        if requested_mode == "auto":
+            return
+        raise RuntimeError(
+            f"GUI RC handoff service {service_name} is unavailable; refusing live exclusive RC launch"
+        )
+    future = client.call_async(Trigger.Request())
+    import rclpy
+
+    rclpy.spin_until_future_complete(gate, future, timeout_sec=3.0)
+    response = future.result()
+    if response is None or not response.success:
+        message = response.message if response is not None else "no response"
+        raise RuntimeError(f"GUI RC handoff failed: {message}")
+    print(f"[pinger] {response.message}")
+
+
+def _restore_gui_rc_on_shutdown(context, *args, **kwargs):
+    """Return simulator GUI manual control when this terminal launch exits."""
+    del args, kwargs
+    if not _gui_handoff_requested(context):
+        return []
+    import rclpy
+    from std_srvs.srv import Trigger
+
+    service_name = LaunchConfiguration("gui_rc_handoff_service").perform(context)
+    rclpy.init(args=None)
+    gate = rclpy.create_node("pinger_frequency_launch_restore")
+    try:
+        client = gate.create_client(Trigger, service_name)
+        if not client.wait_for_service(timeout_sec=0.75):
+            return []
+        future = client.call_async(Trigger.Request())
+        rclpy.spin_until_future_complete(gate, future, timeout_sec=2.0)
+        response = future.result()
+        if response is not None:
+            print(f"[pinger] GUI RC restore: {response.message}")
+    finally:
+        gate.destroy_node()
+        rclpy.shutdown()
+    return []
 
 
 def _start_real_homing_after_selection(context, *args, **kwargs):
@@ -146,6 +212,8 @@ def _start_real_homing_after_selection(context, *args, **kwargs):
         selection_pub.publish(String(data=choice))
         while not selected_frequency and time.monotonic() < deadline and rclpy.ok():
             rclpy.spin_once(gate, timeout_sec=0.20)
+        if selected_frequency:
+            _handoff_gui_rc_if_available(gate, context)
     finally:
         gate.destroy_node()
         rclpy.shutdown()
@@ -193,6 +261,8 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("audio_channels", default_value="2"),
         DeclareLaunchArgument("audio_sample_rate", default_value="96000"),
         DeclareLaunchArgument("audio_sample_format", default_value="S32LE"),
+        DeclareLaunchArgument("audio_input_latency_s", default_value="0.0"),
+        DeclareLaunchArgument("use_sim_time", default_value="false"),
         DeclareLaunchArgument("odometry_topic", default_value="/odometry/filtered"),
         DeclareLaunchArgument("imu_topic", default_value="/mavros/imu/data"),
         DeclareLaunchArgument("depth_topic", default_value="/depth/pose"),
@@ -233,6 +303,18 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("manual_selection_topic", default_value="/pinger_homing/manual_selection"),
         DeclareLaunchArgument("scan_monitor_s", default_value="5.0"),
         DeclareLaunchArgument("selection_timeout_s", default_value="90.0"),
+        DeclareLaunchArgument(
+            "gui_rc_handoff",
+            default_value="auto",
+            description=(
+                "auto calls the simulator GUI handoff service if it exists; "
+                "false leaves an external physical GUI untouched."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "gui_rc_handoff_service",
+            default_value="/uuv_web_control_gui/suspend_rc_override",
+        ),
     ]
 
     capture = IncludeLaunchDescription(
@@ -274,5 +356,8 @@ def generate_launch_description() -> LaunchDescription:
         TimerAction(
             period=1.5,
             actions=[OpaqueFunction(function=_start_real_homing_after_selection)],
+        ),
+        RegisterEventHandler(
+            OnShutdown(on_shutdown=[OpaqueFunction(function=_restore_gui_rc_on_shutdown)])
         ),
     ])

@@ -27,6 +27,8 @@ def test_real_launch_preserves_external_hydrophone_estimator_boundary() -> None:
     assert 'package="audio_capture"' in launch
     assert 'executable="audio_phase_estimator"' in launch
     assert '"enable_frequency_acquisition": False' in launch
+    assert '"use_sim_time"' in launch
+    assert '"audio_input_latency_s"' in launch
 
 
 def test_xy_alt_hold_does_not_require_depth_for_a_heave_free_probe() -> None:
@@ -42,4 +44,6 @@ def test_interactive_launch_scans_then_injects_selected_startup_frequency() -> N
     assert '"selected_frequency_topic"' in launch
     assert 'launch_arguments["reference_frequency_hz"]' in launch
     assert 'launch_arguments["use_audio_capture"] = "false"' in launch
+    assert 'gui_rc_handoff' in launch
+    assert 'OnShutdown' in launch
     assert not (ROOT / "scripts" / "start_pinger_homing_real.sh").exists()

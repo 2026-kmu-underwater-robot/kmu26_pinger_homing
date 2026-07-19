@@ -50,6 +50,16 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument("audio_channels", default_value="2"),
         DeclareLaunchArgument("audio_sample_rate", default_value="96000"),
         DeclareLaunchArgument("audio_sample_format", default_value="S32LE"),
+        DeclareLaunchArgument(
+            "audio_input_latency_s",
+            default_value="0.0",
+            description="Known capture-to-receive latency; use a small positive value for batched simulator audio.",
+        ),
+        DeclareLaunchArgument(
+            "use_sim_time",
+            default_value="false",
+            description="Use /clock for simulator audio, estimator, controller, and mux timing.",
+        ),
         DeclareLaunchArgument("reference_frequency_hz", default_value="21164.0"),
         DeclareLaunchArgument("odometry_topic", default_value="/odometry/filtered"),
         DeclareLaunchArgument("imu_topic", default_value="/mavros/imu/data"),
@@ -140,6 +150,12 @@ def generate_launch_description() -> LaunchDescription:
             ("/homing/direction", direction_topic),
         ],
         parameters=[{
+            "use_sim_time": ParameterValue(
+                LaunchConfiguration("use_sim_time"), value_type=bool
+            ),
+            "audio_input_latency_s": ParameterValue(
+                LaunchConfiguration("audio_input_latency_s"), value_type=float
+            ),
             "reference_frequency_hz": ParameterValue(
                 LaunchConfiguration("reference_frequency_hz"), value_type=float
             ),
@@ -161,6 +177,9 @@ def generate_launch_description() -> LaunchDescription:
             # tank.  The real profile retains its conservative timing and
             # requires the vehicle's actual ALT_HOLD state before live RC.
             "controller_mode": "active_range",
+            "use_sim_time": ParameterValue(
+                LaunchConfiguration("use_sim_time"), value_type=bool
+            ),
             "navigation_mode": "no_odom_phase",
             "acoustic_estimator_mode": "phase",
             "controller_profile": "real",
@@ -248,6 +267,9 @@ def generate_launch_description() -> LaunchDescription:
         name="pinger_rc_override_mux",
         output="screen",
         parameters=[{
+            "use_sim_time": ParameterValue(
+                LaunchConfiguration("use_sim_time"), value_type=bool
+            ),
             "output_topic": rc_topic,
             "pinger_topic": pinger_rc_topic,
             # The physical joystick has higher mux priority than autonomous
