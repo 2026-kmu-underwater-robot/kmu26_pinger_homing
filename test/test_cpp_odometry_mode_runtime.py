@@ -17,17 +17,29 @@ import time
 os.environ.setdefault("ROS_DOMAIN_ID", "194")
 
 import rclpy
+from mavros_msgs.msg import OverrideRCIn, State
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from std_msgs.msg import Float64, String
 
 
 class OdomRuntimeProbe(Node):
-    def __init__(self) -> None:
+    def __init__(self, quality_only: bool) -> None:
         super().__init__("cpp_odometry_mode_runtime_probe")
+        self.quality_only = quality_only
         self.odom_pub = self.create_publisher(Odometry, "/test/pinger/odometry", 20)
         self.delta_pub = self.create_publisher(Float64, "/test/pinger/delta", 50)
         self.iq_pub = self.create_publisher(Float64, "/test/pinger/iq", 20)
+        self.quality_pub = self.create_publisher(Float64, "/test/pinger/quality", 20)
+        state_qos = QoSProfile(
+            depth=1,
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+        )
+        self.state_pub = self.create_publisher(State, "/test/pinger/state", state_qos)
+        self.active_rc_seen = False
+        self.create_subscription(OverrideRCIn, "/test/pinger/rc", self._on_rc, 20)
         self.status: dict = {}
         self.create_subscription(String, "/test/pinger/status", self._on_status, 20)
         self.x = 0.0
@@ -39,6 +51,11 @@ class OdomRuntimeProbe(Node):
             return
         if isinstance(value, dict):
             self.status = value
+
+    def _on_rc(self, message: OverrideRCIn) -> None:
+        inactive = {OverrideRCIn.CHAN_RELEASE, OverrideRCIn.CHAN_NOCHANGE, 1500}
+        if any(int(value) not in inactive for value in message.channels):
+            self.active_rc_seen = True
 
     def publish_inputs(self) -> None:
         # Slowly varying XYZ coordinates mirror localization output during a
@@ -54,26 +71,37 @@ class OdomRuntimeProbe(Node):
         odom.pose.pose.orientation.w = 1.0
         odom.twist.twist.linear.x = 0.06
         self.odom_pub.publish(odom)
-        self.delta_pub.publish(Float64(data=-0.0002))
+        if not self.quality_only:
+            self.delta_pub.publish(Float64(data=-0.0002))
         self.iq_pub.publish(Float64(data=1.0))
+        self.quality_pub.publish(Float64(data=0.4))
+        state = State()
+        state.connected = True
+        state.armed = True
+        state.mode = "ALT_HOLD"
+        self.state_pub.publish(state)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--controller", required=True)
+    parser.add_argument("--quality-only", action="store_true")
     args = parser.parse_args()
     process = subprocess.Popen([
         args.controller,
         "--ros-args",
-        "-p", "dry_run:=true",
+        "-p", f"dry_run:={'false' if args.quality_only else 'true'}",
         "-p", "navigation_mode:=odometry",
         "-p", "legacy_python_sequence:=true",
+        "-p", "mode:=ALT_HOLD",
         "-p", "rc_pwm_span:=400.0",
         "-p", "probe_pwm_delta:=20",
         "-p", "approach_pwm_delta:=25",
         "-p", "odometry_topic:=/test/pinger/odometry",
         "-p", "delta_range_topic:=/test/pinger/delta",
         "-p", "iq_magnitude_topic:=/test/pinger/iq",
+        "-p", "audio_quality_topic:=/test/pinger/quality",
+        "-p", "bootstrap_probe_on_audio_quality:=true",
         "-p", "status_topic:=/test/pinger/status",
         "-p", "rc_output_topic:=/test/pinger/rc",
         "-p", "direction_input_topic:=/test/pinger/direction",
@@ -83,7 +111,7 @@ def main() -> int:
         "-p", "max_runtime_s:=0.0",
     ])
     rclpy.init()
-    probe = OdomRuntimeProbe()
+    probe = OdomRuntimeProbe(args.quality_only)
     try:
         deadline = time.monotonic() + 5.0
         accepted = False
@@ -100,13 +128,29 @@ def main() -> int:
                 and int(status.get("legacy_probe_pwm_delta", 0)) == 20
                 and int(status.get("legacy_approach_pwm_delta", 0)) == 25
                 and status.get("state") in {"PROBE", "REPROBE"}
-                and int(status.get("sample_count", 0)) > 0
+                and (
+                    (
+                        args.quality_only
+                        and int(status.get("sample_count", -1)) == 0
+                        and status.get("phase_measurement_fresh") is False
+                        and status.get("audio_quality_fresh") is True
+                        and status.get("audio_bootstrap_active") is True
+                        and status.get("control_output_active") is True
+                        and probe.active_rc_seen
+                    )
+                    or (
+                        not args.quality_only
+                        and int(status.get("sample_count", 0)) > 0
+                        and status.get("phase_measurement_fresh") is True
+                    )
+                )
             ):
                 accepted = True
                 break
         if not accepted:
             raise AssertionError(f"C++ odometry Phase path did not become ready: {probe.status}")
-        print("cpp_odometry_mode_runtime=PASS state=PROBE source=/odometry/filtered-contract")
+        mode = "quality-bootstrap" if args.quality_only else "phase-delta"
+        print(f"cpp_odometry_mode_runtime=PASS state=PROBE source={mode}")
         return 0
     finally:
         probe.destroy_node()

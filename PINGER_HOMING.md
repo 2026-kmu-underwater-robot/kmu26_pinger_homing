@@ -39,6 +39,9 @@ ros2 launch kmu26_pinger_homing pinger_homing_real_interactive.launch.py \
 시작한 뒤, 검증된 C++ Phase 제어기를 실행한다. 기본 `navigation_mode:=odometry`는
 `/odometry/filtered`의 pose와 Phase 거리변화를 레거시 이동 궤적에 결합해 핑거 위치를
 추정한다. `no_odom_phase`는 로컬라이제이션이 없는 경우의 명시적 fallback이다.
+Phase 품질 필터가 초기 delta를 만들지 못해도 `/audio_phase_estimator/iq_snr_ratio`가
+살아 있으면 저속 probe를 먼저 수행한다. 이 heartbeat는 탐색 시작에만 쓰며, 유효한
+delta-range fit과 source lock 없이는 ALIGN/APPROACH로 넘어가지 않는다.
 
 실물 interactive launch는 고정 pinger carrier를 더 잘 구분하도록 기본
 `scan_fft_size:=16384`, `scan_fft_hop_size:=8192`를 사용한다. 따라서 96 kHz

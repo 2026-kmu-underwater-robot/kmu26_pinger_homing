@@ -39,6 +39,8 @@ def test_real_launch_preserves_external_hydrophone_estimator_boundary() -> None:
     assert '"enable_frequency_acquisition": False' in launch
     assert '"use_sim_time"' in launch
     assert '"audio_input_latency_s"' in launch
+    assert '"audio_quality_topic"' in launch
+    assert '"bootstrap_probe_on_audio_quality"' in launch
 
 
 def test_xy_alt_hold_does_not_require_depth_for_a_heave_free_probe() -> None:

@@ -187,6 +187,12 @@ class PingerHomingController : public rclcpp::Node {
         "delta_range_topic", "/audio_phase_estimator/delta_range_m");
     iq_magnitude_topic_ = declare_parameter<std::string>(
         "iq_magnitude_topic", "/audio_phase_estimator/iq_magnitude");
+    audio_quality_topic_ = declare_parameter<std::string>(
+        "audio_quality_topic", "/audio_phase_estimator/iq_snr_ratio");
+    bootstrap_probe_on_audio_quality_ = declare_parameter<bool>(
+        "bootstrap_probe_on_audio_quality", true);
+    audio_quality_timeout_s_ = std::max(
+        0.5, declare_parameter<double>("audio_quality_timeout_s", 3.0));
     direction_output_topic_ = declare_parameter<std::string>(
         "direction_output_topic", "/pinger_homing/direction_body");
     control_direction_output_topic_ = declare_parameter<std::string>(
@@ -706,6 +712,13 @@ class PingerHomingController : public rclcpp::Node {
     iq_magnitude_sub_ = create_subscription<std_msgs::msg::Float64>(
         iq_magnitude_topic_, rclcpp::QoS(50),
         [this](const std_msgs::msg::Float64::SharedPtr msg) { on_iq_magnitude(msg->data); });
+    audio_quality_sub_ = create_subscription<std_msgs::msg::Float64>(
+        audio_quality_topic_, rclcpp::QoS(50),
+        [this](const std_msgs::msg::Float64::SharedPtr msg) {
+          if (!std::isfinite(msg->data)) return;
+          last_audio_quality_value_ = msg->data;
+          last_audio_quality_ = SteadyClock::now();
+        });
     if (navigation_mode_ == "odometry") {
       direction_sub_ = create_subscription<geometry_msgs::msg::Vector3Stamped>(
           direction_topic_, rclcpp::QoS(10),
@@ -950,6 +963,17 @@ class PingerHomingController : public rclcpp::Node {
       return;
     }
     if (!ready(now)) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "pinger probe blocked: connected=%s armed=%s actual_mode=%s required_mode=%s "
+          "odom=%s phase_delta=%s iq_quality=%s",
+          connected_ ? "true" : "false", armed_ ? "true" : "false",
+          actual_vehicle_mode_.empty() ? "unavailable" : actual_vehicle_mode_.c_str(),
+          mode_.c_str(),
+          (position_ && seconds_since(last_odometry_, now) < odometry_timeout_s_)
+              ? "fresh" : "stale",
+          phase_delta_fresh(now) ? "fresh" : "stale",
+          audio_quality_fresh(now) ? "fresh" : "stale");
       // Match the deployed Python safety behavior: stale required input stops
       // motion and invalidates the in-progress state timer.  Once odometry and
       // audio recover, WAIT_VEHICLE always starts a fresh PROBE sequence.
@@ -1040,9 +1064,29 @@ class PingerHomingController : public rclcpp::Node {
     return std::nullopt;
   }
 
+  bool phase_delta_fresh(const SteadyTime &now) const {
+    return seconds_since(last_audio_, now) < audio_timeout_s_;
+  }
+
+  bool audio_quality_fresh(const SteadyTime &now) const {
+    return last_audio_quality_ != SteadyTime{} &&
+           seconds_since(last_audio_quality_, now) < audio_quality_timeout_s_;
+  }
+
+  bool audio_ready_for_probe(const SteadyTime &now) const {
+    // A weak carrier may be rejected by the Phase quality gate before it can
+    // publish delta_range. The small, bounded probe is what creates the
+    // spatial diversity needed to improve that estimate, so allow probing on
+    // the estimator's quality heartbeat. Source lock and APPROACH still
+    // require real delta-range samples and can never be authorized by this
+    // heartbeat alone.
+    return phase_delta_fresh(now) ||
+           (bootstrap_probe_on_audio_quality_ && audio_quality_fresh(now));
+  }
+
   bool no_odom_phase_ready(const SteadyTime &now) const {
     if ((!dry_run_ && !live_control_ready(now)) ||
-        seconds_since(last_audio_, now) >= audio_timeout_s_ ||
+        !audio_ready_for_probe(now) ||
         !attitude_quaternion(now)) {
       return false;
     }
@@ -1663,7 +1707,7 @@ class PingerHomingController : public rclcpp::Node {
   bool ready(const SteadyTime &now) const {
     return (dry_run_ || live_control_ready(now)) && position_ &&
            seconds_since(last_odometry_, now) < odometry_timeout_s_ &&
-           seconds_since(last_audio_, now) < audio_timeout_s_;
+           audio_ready_for_probe(now);
   }
 
   bool vehicle_state_fresh(const SteadyTime &now) const {
@@ -2949,7 +2993,9 @@ class PingerHomingController : public rclcpp::Node {
     const bool imu_fresh = imu_orientation_ &&
         seconds_since(last_imu_, now) < imu_timeout_s_;
     const bool depth_fresh = current_position_z(now).has_value();
-    const bool audio_fresh = seconds_since(last_audio_, now) < audio_timeout_s_;
+    const bool phase_measurement_fresh = phase_delta_fresh(now);
+    const bool quality_fresh = audio_quality_fresh(now);
+    const bool audio_fresh = audio_ready_for_probe(now);
     const bool state_fresh = vehicle_state_fresh(now);
     const bool mode_ready = vehicle_mode_ready(now);
     const bool live_ready = live_control_ready(now);
@@ -3014,6 +3060,11 @@ class PingerHomingController : public rclcpp::Node {
         << ",\"required_vehicle_mode\":\"" << mode_ << "\""
         << ",\"vehicle_mode_ready\":" << bool_text(mode_ready)
         << ",\"audio_fresh\":" << bool_text(audio_fresh)
+        << ",\"phase_measurement_fresh\":" << bool_text(phase_measurement_fresh)
+        << ",\"audio_quality_fresh\":" << bool_text(quality_fresh)
+        << ",\"audio_bootstrap_active\":"
+        << bool_text(!phase_measurement_fresh && bootstrap_probe_on_audio_quality_ && quality_fresh)
+        << ",\"audio_quality_value\":" << json_number(last_audio_quality_value_)
         << ",\"direction_fresh\":" << bool_text(direction_fresh)
         << ",\"odometry_fresh\":" << bool_text(odometry_fresh)
         << ",\"imu_fresh\":" << bool_text(imu_fresh)
@@ -3241,6 +3292,7 @@ class PingerHomingController : public rclcpp::Node {
   std::string vehicle_state_topic_;
   std::string delta_range_topic_;
   std::string iq_magnitude_topic_;
+  std::string audio_quality_topic_;
   std::string direction_output_topic_;
   std::string control_direction_output_topic_;
   std::string status_topic_;
@@ -3276,6 +3328,8 @@ class PingerHomingController : public rclcpp::Node {
   double imu_timeout_s_{1.0};
   double depth_pose_timeout_s_{1.0};
   double audio_timeout_s_{3.0};
+  double audio_quality_timeout_s_{3.0};
+  bool bootstrap_probe_on_audio_quality_{true};
   double vehicle_disconnect_grace_s_{0.0};
   double vehicle_state_timeout_s_{3.5};
   double direction_timeout_s_{1.0};
@@ -3425,6 +3479,8 @@ class PingerHomingController : public rclcpp::Node {
   SteadyTime last_imu_{};
   SteadyTime last_depth_pose_{};
   SteadyTime last_audio_{};
+  SteadyTime last_audio_quality_{};
+  std::optional<double> last_audio_quality_value_;
   SteadyTime last_direction_{};
   SteadyTime last_fit_{};
   SteadyTime last_service_request_{};
@@ -3532,6 +3588,7 @@ class PingerHomingController : public rclcpp::Node {
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr delta_range_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr iq_magnitude_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr audio_quality_sub_;
   rclcpp::Subscription<geometry_msgs::msg::Vector3Stamped>::SharedPtr direction_sub_;
   rclcpp::Publisher<mavros_msgs::msg::OverrideRCIn>::SharedPtr rc_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Vector3Stamped>::SharedPtr direction_pub_;

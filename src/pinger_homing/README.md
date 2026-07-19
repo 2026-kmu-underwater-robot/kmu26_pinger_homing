@@ -25,6 +25,12 @@ approaches while continuing to update the fit. `no_odom_phase` remains an
 explicit fallback for a vehicle without trustworthy localization. Simulator
 ground truth is never a controller input. ALT_HOLD owns vertical control.
 
+Weak-signal startup does not deadlock on the first rejected Phase window.
+The estimator's `/audio_phase_estimator/iq_snr_ratio` heartbeat may authorize
+only the bounded probe trajectory. A real delta-range fit and source lock are
+still mandatory before ALIGN or APPROACH, so noise can cause a safe probe and
+eventual estimate failure but cannot authorize blind forward travel.
+
 The test-tank profile, and an explicit physical `no_odom_phase` fallback,
 enable `motion_response` as a separate timing path. It reads **only the XY speed magnitude** from
 `/odometry/filtered`, never pose or velocity direction. If a Phase ABBA leg

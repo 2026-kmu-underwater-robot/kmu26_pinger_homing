@@ -124,6 +124,11 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument(
             "iq_magnitude_topic", default_value="/audio_phase_estimator/iq_magnitude"
         ),
+        DeclareLaunchArgument(
+            "audio_quality_topic", default_value="/audio_phase_estimator/iq_snr_ratio"
+        ),
+        DeclareLaunchArgument("bootstrap_probe_on_audio_quality", default_value="true"),
+        DeclareLaunchArgument("audio_quality_timeout_s", default_value="3.0"),
         DeclareLaunchArgument("direction_topic", default_value="/homing/direction"),
         DeclareLaunchArgument("status_topic", default_value="/pinger_homing/status"),
         DeclareLaunchArgument(
@@ -215,6 +220,7 @@ def generate_launch_description() -> LaunchDescription:
             ("/depth/pose", depth_topic),
             ("/audio_phase_estimator/delta_range_m", delta_range_topic),
             ("/audio_phase_estimator/iq_magnitude", iq_magnitude_topic),
+            ("/audio_phase_estimator/iq_snr_ratio", LaunchConfiguration("audio_quality_topic")),
             ("/homing/direction", direction_topic),
         ],
         parameters=[{
@@ -288,6 +294,13 @@ def generate_launch_description() -> LaunchDescription:
             "vehicle_state_topic": state_topic,
             "delta_range_topic": delta_range_topic,
             "iq_magnitude_topic": iq_magnitude_topic,
+            "audio_quality_topic": LaunchConfiguration("audio_quality_topic"),
+            "bootstrap_probe_on_audio_quality": ParameterValue(
+                LaunchConfiguration("bootstrap_probe_on_audio_quality"), value_type=bool
+            ),
+            "audio_quality_timeout_s": ParameterValue(
+                LaunchConfiguration("audio_quality_timeout_s"), value_type=float
+            ),
             "direction_input_topic": direction_topic,
             "direction_output_topic": direction_output_topic,
             "status_topic": status_topic,

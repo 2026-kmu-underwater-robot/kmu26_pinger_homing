@@ -134,6 +134,8 @@ ros2 launch kmu26_pinger_homing pinger_homing_real_interactive.launch.py \
 |  | `scan_persistent_min_ratio` | `0.30` | 약한 신호도 10초 창의 30% 이상 같은 주파수면 후보 인정 |
 | 위치 | `navigation_mode` | `odometry` | `/odometry/filtered` 위치와 Phase 거리변화로 source fitting |
 |  | `odometry_topic` | `/odometry/filtered` | 실물 로컬라이제이션 pose/twist 입력 |
+| 약신호 bootstrap | `bootstrap_probe_on_audio_quality` | `true` | Phase delta가 아직 없어도 IQ quality heartbeat가 있으면 제한된 probe 시작 |
+|  | `audio_quality_topic` | `/audio_phase_estimator/iq_snr_ratio` | 오디오 분석 생존 확인; source lock이나 접근 허가에는 사용하지 않음 |
 | 차량 계약 | `mode` | `ALT_HOLD` | live RC를 허용하는 ArduSub 모드 |
 |  | `rate_hz` | `30 Hz` | yaw/상태 제어 주기 |
 |  | `auto_arm` / `auto_mode` | `false` / `false` | 실물에서 임의 arm·모드변경 방지 |
@@ -164,6 +166,8 @@ ros2 topic echo /pinger_homing/status
 
 기본 odometry 모드에서는 `odometry_fresh`, `sample_count`,
 `estimated_source_world`, `source_locked`, `rms_residual_m`를 확인한다.
+`audio_bootstrap_active=true`이면 약신호 탐색은 수행 중이지만 아직 유효 Phase delta가
+없다는 뜻이다. `phase_measurement_fresh=true`가 된 뒤에만 source fit과 접근이 가능하다.
 로컬라이제이션을 쓸 수 없는 비상 비교 운용에서만
 `navigation_mode:=no_odom_phase`를 주며, 그때는 `no_odom_phase.innovation_ratio`,
 `innovation_reestimate_count`, `motion_response`를 본다.
