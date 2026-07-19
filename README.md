@@ -1,13 +1,13 @@
 # KMU26 AUV Control
 
-이 저장소는 역할이 겹치지 않는 ROS 2 패키지를 관리한다. 실물용 레거시 GUI/FSM과
-별도로 `kmu26_finger_homing`은 하이드로폰 fork나 FSM에 의존하지 않는 독립 2-D
-Phase/SNR 핑거 호밍 패키지다.
+이 저장소는 핑거 호밍에 필요한 ROS 2 패키지만 관리한다. `kmu26_finger_homing`은
+하이드로폰 fork나 FSM에 의존하지 않는 독립 2-D Phase/SNR 핑거 호밍 패키지다.
+비전 미션 FSM은 작업공간의 `archive/kmu26_vision_mission_fsm`으로 분리되어
+기본 빌드와 실행에 포함되지 않는다.
 
 ```text
 kmu26_pinger_homing/       완성된 하이드로폰 핑거 호밍 + RC + Web GUI
 kmu26_finger_homing/       독립 2-D Phase/SNR 호밍 + 5초 주파수 선택
-kmu26_vision_mission_fsm/  시험 중인 YOLO/비전 제어 + 미션 FSM
 ```
 
 NUC의 최종 소스 경계는 다음과 같다.
@@ -17,7 +17,7 @@ NUC의 최종 소스 경계는 다음과 같다.
 ├── kmu26_pinger_homing/            # 이 Git 저장소
 │   ├── kmu26_pinger_homing/        # 차량측 RC 제어·mux·GUI ROS 패키지
 │   ├── kmu26_finger_homing/        # 독립 2-D Phase/SNR 패키지
-│   └── kmu26_vision_mission_fsm/   # 비전 FSM ROS 패키지
+│   └── (archive는 ../archive/kmu26_vision_mission_fsm에 별도 보관)
 └── kmu26_auv_hydrophone/           # 별도 Git 저장소, 신호처리 ROS 패키지들
     ├── audio_common/
     ├── audio_common_msgs/
@@ -36,7 +36,7 @@ git clone https://github.com/2026-kmu-underwater-robot/kmu26_auv.git
 cd ~/auv_ws
 rosdep install --from-paths src --ignore-src -r -y
 colcon build --symlink-install \
-  --packages-up-to kmu26_finger_homing kmu26_pinger_homing kmu26_vision_mission_fsm
+  --packages-up-to kmu26_finger_homing kmu26_pinger_homing
 source install/setup.bash
 ```
 
@@ -75,9 +75,5 @@ ros2 launch kmu26_finger_homing finger_homing_test_tank.launch.py \
 `estimator_mode:=snr`로 SNR 모드를 선택할 수 있다. 다른 RC 소유권을 보존하려면
 `rc_output_topic`을 기본 `/control/finger_homing/rc_override`로 둔다.
 
-시험 중인 비전 FSM dry-run:
-
-```bash
-ros2 launch kmu26_vision_mission_fsm mission_fsm_real.launch.py \
-  use_observation_mission_fsm:=true dry_run:=true
-```
+비전 미션 FSM을 다시 사용할 때는 `archive/kmu26_vision_mission_fsm`을 별도 ROS
+작업공간으로 옮겨 독립적으로 빌드한다.
