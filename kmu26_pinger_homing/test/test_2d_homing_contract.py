@@ -46,3 +46,7 @@ def test_xy_only_controller():
     assert "depth" not in text.lower()
     assert '"/homing/direction"' in text
     assert '"/pinger_homing/direction_body"' in text
+    assert "records_observation()" in text
+    assert "update_direction_from_feedback(false)" in text
+    assert "approach_dither_command_" in text
+    assert '\\"feedback_updates\\"' in text

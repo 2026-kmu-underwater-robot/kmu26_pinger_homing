@@ -47,7 +47,18 @@ class FingerHomingController final : public rclcpp::Node {
     probe_leg_s_ = std::clamp(declare_parameter<double>("probe_leg_s", 0.8), 0.3, 3.0);
     probe_neutral_s_ = std::clamp(declare_parameter<double>("probe_neutral_s", 0.3), 0.1, 2.0);
     probe_settle_s_ = std::clamp(declare_parameter<double>("probe_settle_s", 0.5), 0.1, 2.0);
-    reprobe_s_ = std::clamp(declare_parameter<double>("reprobe_s", 7.0), 2.0, 30.0);
+    // A full ABBA probe establishes the first bearing.  During APPROACH we
+    // continue to fit a rolling phase/SNR gradient, so this is only a
+    // periodic reconditioning probe rather than the sole feedback source.
+    reprobe_s_ = std::clamp(declare_parameter<double>("reprobe_s", 12.0), 2.0, 30.0);
+    feedback_update_s_ = std::clamp(declare_parameter<double>("feedback_update_s", 0.5), 0.15, 3.0);
+    feedback_window_s_ = std::clamp(declare_parameter<double>("feedback_window_s", 6.0), 2.0, 20.0);
+    feedback_blend_ = std::clamp(declare_parameter<double>("feedback_blend", 0.25), 0.05, 0.8);
+    min_xy_span_m_ = std::clamp(declare_parameter<double>("min_xy_span_m", 0.08), 0.02, 0.5);
+    approach_dither_command_ = std::clamp(
+        declare_parameter<double>("approach_dither_command", 0.06), 0.0, 0.20);
+    approach_dither_period_s_ = std::clamp(
+        declare_parameter<double>("approach_dither_period_s", 0.9), 0.3, 3.0);
     success_range_m_ = std::max(0.0, declare_parameter<double>("success_range_m", 1.2));
     range_constant_ = std::max(0.0, declare_parameter<double>("amplitude_range_constant", 0.325));
     min_snr_db_ = declare_parameter<double>("min_snr_db", 3.0);
@@ -171,27 +182,38 @@ class FingerHomingController final : public rclcpp::Node {
   const char *attitude_source() {
     return imu_yaw_fresh() ? "mavros_imu_aligned" : "odometry_fallback";
   }
+  bool records_observation() const {
+    return state_ == State::PROBE || state_ == State::APPROACH;
+  }
+  void trim_observations(std::deque<Obs> &samples, double time_s) {
+    while (!samples.empty() && time_s - samples.front().t > feedback_window_s_) samples.pop_front();
+    while (samples.size() > 500U) samples.pop_front();
+  }
   void on_delta(double value) {
     if (!std::isfinite(value)) return;
     last_audio_ = now();
     cumulative_range_ += std::clamp(value, -0.15, 0.15);
-    if (state_ == State::PROBE && have_odom_) {
-      obs_.push_back({x_, y_, elapsed(state_started_), cumulative_range_});
-      if (obs_.size() > 500U) obs_.pop_front();
+    if (records_observation() && have_odom_) {
+      const double time_s = now().seconds();
+      obs_.push_back({x_, y_, time_s, cumulative_range_});
+      trim_observations(obs_, time_s);
     }
   }
   void on_snr(double value) {
     if (!std::isfinite(value) || value < min_snr_db_) return;
     last_snr_ = value;
-    if (state_ == State::PROBE && have_odom_) {
-      snr_obs_.push_back({x_, y_, elapsed(state_started_), value});
-      if (snr_obs_.size() > 500U) snr_obs_.pop_front();
+    if (records_observation() && have_odom_) {
+      const double time_s = now().seconds();
+      snr_obs_.push_back({x_, y_, time_s, value});
+      trim_observations(snr_obs_, time_s);
     }
   }
 
   void transition(State next) {
     state_ = next; state_started_ = Clock::now();
-    if (next == State::PROBE) { obs_.clear(); snr_obs_.clear(); cumulative_range_ = 0.0; }
+    if (next == State::PROBE) {
+      obs_.clear(); snr_obs_.clear(); cumulative_range_ = 0.0; feedback_updates_ = 0;
+    }
     RCLCPP_INFO(get_logger(), "pinger homing state -> %s", state_name(next).c_str());
   }
   static std::string state_name(State state) {
@@ -256,6 +278,41 @@ class FingerHomingController final : public rclcpp::Node {
     return direction.normalized();
   }
 
+  bool has_xy_observability() const {
+    const auto &samples = estimator_mode_ == "snr" ? snr_obs_ : obs_;
+    if (samples.size() < static_cast<std::size_t>(min_samples_)) return false;
+    double min_x = std::numeric_limits<double>::infinity();
+    double max_x = -std::numeric_limits<double>::infinity();
+    double min_y = std::numeric_limits<double>::infinity();
+    double max_y = -std::numeric_limits<double>::infinity();
+    for (const auto &sample : samples) {
+      min_x = std::min(min_x, sample.x); max_x = std::max(max_x, sample.x);
+      min_y = std::min(min_y, sample.y); max_y = std::max(max_y, sample.y);
+    }
+    // A rolling fit needs movement in both world-plane axes.  The small
+    // dither during approach provides this without leaving the homing path.
+    return (max_x - min_x) >= min_xy_span_m_ && (max_y - min_y) >= min_xy_span_m_;
+  }
+
+  bool update_direction_from_feedback(bool initial) {
+    if (!has_xy_observability()) return false;
+    const auto measured = fit_direction();
+    if (!measured) return false;
+    if (!direction_world_ || initial) {
+      direction_world_ = *measured;
+      ++feedback_updates_;
+      return true;
+    }
+    const double agreement = direction_world_->dot(*measured);
+    // Reject one-window 180-degree phase/multipath flips.  A clean periodic
+    // ABBA probe will reinitialise the estimate if the environment changes.
+    if (agreement < -0.20) return false;
+    *direction_world_ = ((1.0 - feedback_blend_) * (*direction_world_) +
+                         feedback_blend_ * (*measured)).normalized();
+    ++feedback_updates_;
+    return true;
+  }
+
   void probe_command(double t, double &forward, double &lateral) const {
     forward = lateral = 0.0;
     double rem = t - probe_settle_s_;
@@ -294,12 +351,8 @@ class FingerHomingController final : public rclcpp::Node {
     if (state_ == State::WAIT_FREQUENCY || state_ == State::WAIT_VEHICLE) transition(State::PROBE);
     if (state_ == State::PROBE) {
       if (elapsed(state_started_) >= probe_duration()) {
-        const auto direction = fit_direction();
-        if (!direction) { transition(State::FAILED); publish_release(); publish_status(); return; }
-        if (direction_world_ && direction_world_->dot(*direction) > 0.25) {
-          *direction_world_ = (0.75 * (*direction_world_) + 0.25 * (*direction)).normalized();
-        } else {
-          direction_world_ = *direction;
+        if (!update_direction_from_feedback(true)) {
+          transition(State::FAILED); publish_release(); publish_status(); return;
         }
         transition(State::ALIGN);
       } else {
@@ -311,6 +364,10 @@ class FingerHomingController final : public rclcpp::Node {
       transition(State::SUCCESS); publish_release(); publish_status(); return;
     }
     if (!direction_world_) { transition(State::PROBE); publish_neutral(); return; }
+    if (state_ == State::APPROACH && elapsed(last_feedback_update_) >= feedback_update_s_) {
+      update_direction_from_feedback(false);
+      last_feedback_update_ = Clock::now();
+    }
     const double yaw_world_body = body_yaw();
     const double forward_axis = std::cos(yaw_world_body) * direction_world_->x() +
                                 std::sin(yaw_world_body) * direction_world_->y();
@@ -324,8 +381,13 @@ class FingerHomingController final : public rclcpp::Node {
     }
     if (state_ == State::ALIGN) transition(State::APPROACH);
     if (elapsed(state_started_) > reprobe_s_) { transition(State::PROBE); publish_neutral(); publish_status(); return; }
+    const double dither_phase = std::fmod(elapsed(state_started_), 2.0 * approach_dither_period_s_);
+    const double dither = approach_dither_command_ > 0.0
+        ? (dither_phase < approach_dither_period_s_ ? approach_dither_command_ : -approach_dither_command_)
+        : 0.0;
     publish_command(std::clamp(forward_command_ * std::max(0.0, forward_axis), 0.0, forward_command_),
-                    std::clamp(lateral_command_ * lateral_axis, -lateral_command_, lateral_command_), yaw);
+                    std::clamp(lateral_command_ * lateral_axis + dither,
+                               -lateral_command_, lateral_command_), yaw);
     publish_status();
   }
 
@@ -358,7 +420,8 @@ class FingerHomingController final : public rclcpp::Node {
          << last_forward_ << "," << last_lateral_ << "," << last_yaw_ << "],\"dry_run\":"
          << (dry_run_ ? "true" : "false") << ",\"attitude_source\":\""
          << attitude_source() << "\",\"rc4_yaw_inverted\":"
-         << (invert_rc_yaw_ ? "true" : "false") << "}";
+         << (invert_rc_yaw_ ? "true" : "false") << ",\"feedback_updates\":"
+         << feedback_updates_ << ",\"feedback_window_s\":" << feedback_window_s_ << "}";
     std_msgs::msg::String msg; msg.data = json.str(); status_pub_->publish(msg);
     if (direction_world_) {
       geometry_msgs::msg::Vector3Stamped direction;
@@ -385,7 +448,9 @@ class FingerHomingController final : public rclcpp::Node {
 
   std::string mode_, estimator_mode_, odom_topic_, imu_topic_, rc_topic_, selected_topic_, required_mode_;
   double rc_span_{400.0}, probe_command_{0.2}, forward_command_{0.28}, lateral_command_{0.22};
-  double probe_leg_s_{0.8}, probe_neutral_s_{0.3}, probe_settle_s_{0.5}, reprobe_s_{7.0};
+  double probe_leg_s_{0.8}, probe_neutral_s_{0.3}, probe_settle_s_{0.5}, reprobe_s_{12.0};
+  double feedback_update_s_{0.5}, feedback_window_s_{6.0}, feedback_blend_{0.25}, min_xy_span_m_{0.08};
+  double approach_dither_command_{0.06}, approach_dither_period_s_{0.9};
   double success_range_m_{1.2}, range_constant_{0.325}, min_snr_db_{3.0};
   int min_samples_{16};
   double yaw_gain_{0.65}, yaw_rate_gain_{0.25}, yaw_limit_{0.30}, align_rad_{0.31}, max_runtime_s_{180.0};
@@ -396,7 +461,8 @@ class FingerHomingController final : public rclcpp::Node {
   double last_forward_{0.0}, last_lateral_{0.0}, last_yaw_{0.0};
   std::optional<Eigen::Vector2d> direction_world_;
   std::deque<Obs> obs_, snr_obs_;
-  State state_{State::WAIT_FREQUENCY}; Time state_started_{}, active_started_{Clock::now()};
+  int feedback_updates_{0};
+  State state_{State::WAIT_FREQUENCY}; Time state_started_{}, active_started_{Clock::now()}, last_feedback_update_{Clock::now()};
   rclcpp::Time last_odom_{0, 0, RCL_ROS_TIME}, last_imu_{0, 0, RCL_ROS_TIME}, last_audio_{0, 0, RCL_ROS_TIME}, last_state_{0, 0, RCL_ROS_TIME};
   std::string vehicle_mode_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
