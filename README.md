@@ -61,8 +61,10 @@ source install/setup.bash
 후보 번호 또는 정확한 주파수를 선택하면 **C++ Phase 제어기**를
 시작한다. 하이드로폰 신호처리 알고리즘 자체는 이 저장소에서 수정하지 않는다.
 실물 기본값은 신뢰 가능한 `/odometry/filtered` 좌표와 검증된 레거시 probe 궤적으로
-핑거 위치를 robust fitting한다. 제어기가 `/mavros/rc/override`를 직접 단독 발행하므로
-이 launch와 동시에 다른 RC publisher를 실행하지 않는다.
+핑거 위치를 robust fitting한다. localization이 없으면 `no_odom_phase`의 X/Y ABBA로
+방위를 추정한다. 실물에서는 `joy2mavros`와 pinger가 각각 mux 입력을 발행하고
+`rc_override_mux` 하나만 `/mavros/rc/override`를 발행한다. 조이스틱을 움직이면
+수동 입력이 우선하며, 오래된 직접 RC publisher가 남아 있으면 mux가 출력을 차단한다.
 
 ### 시작 전 확인
 
@@ -71,7 +73,15 @@ source install/setup.bash
    모드를 바꾸지 않는다.
 2. 하이드로폰 스택이 `/audio`를 단독 publish하는지 확인한다. 이미 별도
    `audio_capture`를 실행 중이면 `use_audio_capture:=false`를 유지한다.
-3. 처음에는 반드시 `dry_run:=true`로 FFT 후보, `/pinger_homing/status`, IMU,
+3. 차량 stack은 joystick을 mux 입력으로 보내고, 중립 stick에서는 release해야 한다.
+
+```bash
+ros2 launch hit25_auv_ros2 rov_start.launch.py \
+  joy_rc_output_topic:=/control/joystick/rc_override \
+  joy_release_when_idle:=true
+```
+
+4. 처음에는 반드시 `dry_run:=true`로 FFT 후보, `/pinger_homing/status`, IMU,
    audio 입력부터 확인한다. 추진이 가능한 수조·테더·비상정지 조건이 확보된 뒤에만
    `dry_run:=false`로 바꾼다.
 
@@ -93,6 +103,8 @@ ros2 topic echo /mavros/imu/data --once
 ```bash
 ros2 launch kmu26_pinger_homing pinger_homing_real_interactive.launch.py \
   dry_run:=true \
+  use_rc_mux:=true \
+  navigation_mode:=no_odom_phase \
   use_audio_capture:=false \
   tank_max_depth_m:=2.0
 ```
@@ -104,12 +116,14 @@ RC 출력은 neutral이다.
 ### 2. 실물 저속 호밍
 
 MAVROS가 `connected=true`, `armed=true`, `mode=ALT_HOLD`임을 확인한 뒤 같은
-명령에서 `dry_run:=false`만 바꾼다. 시작 직후 C++ 제어기가
-`/mavros/rc/override`를 직접 발행한다.
+명령에서 `dry_run:=false`만 바꾼다. 시작 직후 C++ 제어기가 pinger mux 입력을
+발행하고, mux가 선택한 단일 명령만 `/mavros/rc/override`로 전달한다.
 
 ```bash
 ros2 launch kmu26_pinger_homing pinger_homing_real_interactive.launch.py \
   dry_run:=false \
+  use_rc_mux:=true \
+  navigation_mode:=no_odom_phase \
   use_audio_capture:=false \
   tank_max_depth_m:=2.0 \
   probe_pwm_delta:=20 \

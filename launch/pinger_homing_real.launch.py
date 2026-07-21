@@ -16,7 +16,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -37,6 +37,12 @@ def generate_launch_description() -> LaunchDescription:
     status_topic = LaunchConfiguration("status_topic")
     direction_output_topic = LaunchConfiguration("direction_output_topic")
     rc_topic = LaunchConfiguration("rc_topic")
+    use_rc_mux = LaunchConfiguration("use_rc_mux")
+    pinger_rc_topic = LaunchConfiguration("pinger_rc_topic")
+    controller_rc_topic = PythonExpression([
+        "'", pinger_rc_topic, "' if '", use_rc_mux,
+        "'.lower() in ('true', '1', 'yes', 'on') else '", rc_topic, "'",
+    ])
 
     arguments = [
         DeclareLaunchArgument("dry_run", default_value="true"),
@@ -135,6 +141,29 @@ def generate_launch_description() -> LaunchDescription:
             "direction_output_topic", default_value="/pinger_homing/direction_body"
         ),
         DeclareLaunchArgument("rc_topic", default_value="/mavros/rc/override"),
+        DeclareLaunchArgument(
+            "use_rc_mux",
+            default_value="false",
+            description=(
+                "Route pinger and joystick RC through rc_override_mux. The vehicle "
+                "bringup must route joy2mavros to joystick_rc_topic and release idle sticks."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "pinger_rc_topic", default_value="/control/pinger/rc_override"
+        ),
+        DeclareLaunchArgument(
+            "joystick_rc_topic", default_value="/control/joystick/rc_override"
+        ),
+        DeclareLaunchArgument(
+            "mission_rc_topic", default_value="/control/mission/rc_override"
+        ),
+        DeclareLaunchArgument(
+            "vision_rc_topic", default_value="/control/vision/rc_override"
+        ),
+        DeclareLaunchArgument("rc_mux_stale_timeout_s", default_value="0.35"),
+        DeclareLaunchArgument("rc_mux_rate_hz", default_value="50.0"),
+        DeclareLaunchArgument("rc_mux_output_discovery_grace_s", default_value="1.0"),
         DeclareLaunchArgument("rate_hz", default_value="30.0"),
         DeclareLaunchArgument(
             "mode",
@@ -308,10 +337,10 @@ def generate_launch_description() -> LaunchDescription:
             "direction_input_topic": direction_topic,
             "direction_output_topic": direction_output_topic,
             "status_topic": status_topic,
-            # The standard physical launch has exactly one RC owner: this
-            # controller publishes directly to MAVROS. The optional GUI
-            # publisher is suspended by the interactive launch beforehand.
-            "rc_output_topic": rc_topic,
+            # In mux mode the controller never owns the MAVROS topic directly.
+            # This prevents the ABBA probes from racing joy2mavros; deliberate
+            # stick motion retains higher-priority manual takeover in the mux.
+            "rc_output_topic": controller_rc_topic,
             "rate_hz": ParameterValue(LaunchConfiguration("rate_hz"), value_type=float),
             "rc_pwm_span": ParameterValue(LaunchConfiguration("rc_pwm_span"), value_type=float),
             "rc_deadzone_compensation_enabled": ParameterValue(
@@ -423,6 +452,33 @@ def generate_launch_description() -> LaunchDescription:
         }],
     )
 
+    rc_mux = Node(
+        package="kmu26_pinger_homing",
+        executable="rc_override_mux",
+        name="rc_override_mux",
+        output="screen",
+        parameters=[{
+            "output_topic": rc_topic,
+            "pinger_topic": pinger_rc_topic,
+            "joystick_topic": LaunchConfiguration("joystick_rc_topic"),
+            "mission_topic": LaunchConfiguration("mission_rc_topic"),
+            "vision_topic": LaunchConfiguration("vision_rc_topic"),
+            "stale_timeout_s": ParameterValue(
+                LaunchConfiguration("rc_mux_stale_timeout_s"), value_type=float
+            ),
+            "rate_hz": ParameterValue(
+                LaunchConfiguration("rc_mux_rate_hz"), value_type=float
+            ),
+            # If an old/direct joy2mavros still publishes to MAVROS, disable
+            # mux output instead of allowing two physical RC command streams.
+            "require_exclusive_output": True,
+            "output_discovery_grace_s": ParameterValue(
+                LaunchConfiguration("rc_mux_output_discovery_grace_s"), value_type=float
+            ),
+        }],
+        condition=IfCondition(use_rc_mux),
+    )
+
     return LaunchDescription(
-        arguments + [capture_launch, hydrophone_estimator, controller]
+        arguments + [capture_launch, hydrophone_estimator, controller, rc_mux]
     )
