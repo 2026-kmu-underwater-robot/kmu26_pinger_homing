@@ -246,7 +246,7 @@ def generate_launch_description() -> LaunchDescription:
     )
 
     controller = Node(
-        package="kmu26_pinger_homing",
+        package="auv_pinger_homing",
         executable="pinger_homing_controller",
         name="pinger_homing_controller",
         output="screen",

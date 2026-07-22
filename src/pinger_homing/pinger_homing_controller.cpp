@@ -1,5 +1,5 @@
 #include <algorithm>
-// Canonical deployed controller for the standalone kmu26_pinger_homing package.
+// Canonical deployed controller for the standalone auv_pinger_homing package.
 #include <array>
 #include <chrono>
 #include <cmath>
